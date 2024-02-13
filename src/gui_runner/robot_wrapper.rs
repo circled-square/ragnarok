@@ -34,7 +34,7 @@ impl Runnable for RobotWrapper {
             backpack: self.get_backpack().get_contents().clone(),
             env_cond: robotics_lib::interface::look_at_sky(&world),
         };
-        self.to_gui_tx.send(world_data).unwrap();
+        let _ = self.to_gui_tx.send(world_data); // do not unwrap, since Err simply means the GUI was closed and this thread is also about to exit
     }
 
     fn handle_event(&mut self, event: Event) {
