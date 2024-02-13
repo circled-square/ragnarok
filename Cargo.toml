@@ -23,4 +23,3 @@ robotics_lib = { version = "0.1.21", registry = "kellnr" }
 
 [dev-dependencies]
 rip_worldgenerator = { version = "0.5.54", registry = "kellnr" }
-midgard = { version = "*", registry = "kellnr" }
