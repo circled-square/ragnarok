@@ -1,5 +1,6 @@
 mod robot_wrapper;
 mod gui;
+mod interface;
 
 
 use std::collections::{HashMap, HashSet};
@@ -27,12 +28,12 @@ pub(crate) enum RunMode {
 pub(crate) struct PartialWorld {
     pub world: Vec<Vec<Option<Tile>>>,
     pub robot_position: UVec2,
-    pub changed: bool,
-    pub run_mode: RunMode,
-    pub tiles_to_refresh: HashSet<UVec2>,
     pub energy: usize,
     pub backpack: HashMap<Content, usize>,
     pub env_cond: EnvironmentalConditions,
+    pub changed: bool,
+
+    pub run_mode: RunMode,
 }
 impl PartialWorld {
     pub fn new() -> Self {
@@ -41,12 +42,14 @@ impl PartialWorld {
             changed: false,
             robot_position: UVec2::default(),
             run_mode: RunMode::Paused,
-            tiles_to_refresh: HashSet::new(),
             energy: 0,
             backpack: HashMap::new(),
             env_cond: EnvironmentalConditions::new(&[WeatherType::Sunny], 0, 0).unwrap(),
         };
         ret
+    }
+    pub fn is_null(&self) -> bool {
+        self.world.len() == 0
     }
 }
 

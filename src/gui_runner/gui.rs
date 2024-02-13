@@ -3,17 +3,18 @@ mod shaders;
 mod keyboard_event_handler;
 mod frame_delta_timer;
 
+use std::cmp::{max, min};
+use std::collections::HashSet;
 use std::f32::consts::PI;
-use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
 use imgui::{Condition, SliderFlags, TreeNodeFlags};
 use imgui_winit_support::HiDpiMode;
-use nalgebra_glm::{Mat4, Vec3, vec3};
 use winit::event_loop::{EventLoop};
 use winit::window::WindowBuilder;
 use nalgebra_glm as glm;
+use glm::{Mat4, Vec3, vec3, vec2};
 use winit::platform::unix::EventLoopBuilderExtUnix;
 use world_mesh::{WorldMesh};
 use crate::gui_runner::gui::frame_delta_timer::FrameDeltaTimer;
@@ -109,8 +110,8 @@ impl GUI {
         let mut last_was_uncapped = false;
         let mut follow_robot = false;
         let mut find_robot = false;
-
         let mut world_copy = PartialWorld::new();
+        let mut tiles_to_refresh = HashSet::new();
 
         self.event_loop.run(move |ev, _window_target, _control_flow| {
             self.imgui_platform.handle_event(self.imgui_ctx.io_mut(), &self.display.gl_window().window(), &ev);
@@ -126,8 +127,8 @@ impl GUI {
                         kbd_input = self.kbd_event_handler.process_input(input);
 
                         if kbd_input.toggle_continuous_mode {
-                            let mut world = self.world.lock().unwrap();
-                            world.run_mode = match &world.run_mode {
+                            let mut world_ref = self.world.lock().unwrap();
+                            world_ref.run_mode = match &world_ref.run_mode {
                                 RunMode::Continuous(_) => RunMode::Paused,
                                 _ => {
                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
@@ -135,7 +136,8 @@ impl GUI {
                                 }
                             };
                         } else if kbd_input.single_tick {
-                            self.world.lock().unwrap().run_mode = RunMode::SingleTick;
+                            let mut world_ref = self.world.lock().unwrap();
+                            world_ref.run_mode = RunMode::SingleTick;
                         }
                         if kbd_input.toggle_follow_robot {
                             follow_robot = !follow_robot;
@@ -147,10 +149,41 @@ impl GUI {
                 //MainEventsCleared can be used for rendering since we don't lock the framerate
                 winit::event::Event::MainEventsCleared => {
                     let delta = frame_delta_timer.get_delta_and_reset();
+
+                    //update world_copy
+                    {
+                        let mut world_ref = self.world.lock().unwrap();
+                        if world_ref.changed {
+                            if !world_copy.is_null() {
+                                for x in 0..world_ref.world.len() {
+                                    for y in 0..world_ref.world.len() {
+                                        if world_ref.world[x][y] != world_copy.world[x][y] {
+                                            for x in max(x, 1)-1..=min(x+1, world_ref.world.len()-1) {
+                                                for y in max(y, 1)-1..=min(y+1, world_ref.world.len()-1) {
+                                                    tiles_to_refresh.insert(vec2(x as u32, y as u32));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for x in 0..world_ref.world.len() {
+                                    for y in 0..world_ref.world.len() {
+                                        if world_ref.world[x][y].is_some() {
+                                            tiles_to_refresh.insert(vec2(x as u32, y as u32));
+                                        }
+                                    }
+                                }
+                            }
+
+                            world_copy = world_ref.clone();
+                            assert!(world_copy.changed);
+                            world_ref.changed = false;
+                        }
+                    }
+
                     if find_robot || follow_robot {
-                        cam_dir = vec3(-1.0, -1.0, -1.0).normalize();
-                        let robot = self.world.lock().unwrap().robot_position;
-                        cam_pos = vec3(robot.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), robot.y as f32) - cam_dir * 30.0;
+                        cam_pos = vec3(world_copy.robot_position.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), world_copy.robot_position.y as f32) - cam_dir * 30.0;
 
                         find_robot = false;
                     }
@@ -178,15 +211,13 @@ impl GUI {
 
                         //render world
                         {
-                            let _ignore_if_not_locked = self.world.try_lock().and_then(|mut world_ref| {
-                                // update vbo with new world information
-                                if world_ref.changed {
-                                    self.world_mesh.update(&mut world_ref, &self.display);
+                            // update vbo with new world information
+                            if world_copy.changed {
+                                self.world_mesh.update(&mut world_copy, &tiles_to_refresh, &self.display);
+                                tiles_to_refresh.clear();
 
-                                    world_ref.changed = false;
-                                }
-                                Ok(())
-                            });
+                                world_copy.changed = false;
+                            }
 
                             target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList), &self.shader_program,&uniform! { mvp:  *mvp.as_ref() }, &params).unwrap();
                         }
@@ -198,27 +229,16 @@ impl GUI {
                             self.imgui_platform.prepare_render(&ui, self.display.gl_window().window());
 
                             ui.window("Info")
-                                .size([300.0, 450.0], Condition::FirstUseEver)
+                                .size([300.0, 550.0], Condition::FirstUseEver)
                                 .build(|| {
-                                    let (run_mode, energy, backpack, env_cond) = {
-                                        let _ignore_if_not_locked = self.world.try_lock().and_then(|w| {
-                                            world_copy = w.deref().clone();
-                                            Ok(())
-                                        });
-                                        let run_mode = world_copy.run_mode;
-                                        let energy = world_copy.energy;
-                                        let backpack = world_copy.backpack.clone();
-                                        let env_cond = world_copy.env_cond.clone();
-                                        (run_mode, energy, backpack, env_cond)
-                                    };
-
                                     if ui.collapsing_header("Simulation settings", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
 
-                                        match run_mode {
+                                        match world_copy.run_mode {
                                             RunMode::Continuous(_) => {
                                                 if ui.button("Stop") {
-                                                    self.world.lock().unwrap().run_mode = RunMode::Paused;
+                                                    let mut world_ref = self.world.lock().unwrap();
+                                                    world_ref.run_mode = RunMode::Paused;
                                                 } else {
                                                     let mut changed = false;
                                                     changed = changed || ui.checkbox("Uncapped?", &mut last_was_uncapped);
@@ -231,18 +251,21 @@ impl GUI {
 
                                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
                                                     if changed {
-                                                        self.world.lock().unwrap().run_mode = RunMode::Continuous(cap);
+                                                        let mut world_ref = self.world.lock().unwrap();
+                                                        world_ref.run_mode = RunMode::Continuous(cap);
                                                     }
                                                 }
                                             }
                                             RunMode::SingleTick | RunMode::Paused => {
                                                 if ui.button("Run") {
                                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                                    self.world.lock().unwrap().run_mode = RunMode::Continuous(cap);
+                                                    let mut world_ref = self.world.lock().unwrap();
+                                                    world_ref.run_mode = RunMode::Continuous(cap);
                                                 } else {
                                                     ui.same_line();
                                                     if ui.button("Run single tick") {
-                                                        self.world.lock().unwrap().run_mode = RunMode::SingleTick;
+                                                        let mut world_ref = self.world.lock().unwrap();
+                                                        world_ref.run_mode = RunMode::SingleTick;
                                                     }
                                                 }
                                             }
@@ -263,16 +286,16 @@ impl GUI {
 
                                         ui.text_wrapped("Energy:");
                                         ui.same_line();
-                                        imgui::ProgressBar::new(energy as f32 / 1000.0)
-                                            .overlay_text(format!("{}", energy))
+                                        imgui::ProgressBar::new(world_copy.energy as f32 / 1000.0)
+                                            .overlay_text(format!("{}", world_copy.energy))
                                             .build(&ui);
 
                                         let mut backpack_is_empty = true;
                                         if ui.collapsing_header("Backpack:", TreeNodeFlags::DEFAULT_OPEN) {
                                             ui.indent();
 
-                                            for (k, v) in backpack {
-                                                if v != 0 {
+                                            for (k, v) in world_copy.backpack.iter() {
+                                                if *v != 0 {
                                                     ui.text_wrapped(format!("{k}: {v}"));
                                                     backpack_is_empty = false;
                                                 }
@@ -292,8 +315,8 @@ impl GUI {
                                     if ui.collapsing_header("Environmental conditions", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
 
-                                        ui.text_wrapped(format!("Time of day: {:?}", env_cond.get_time_of_day()));
-                                        ui.text_wrapped(format!("Weather: {:?}", env_cond.get_weather_condition()));
+                                        ui.text_wrapped(format!("Time of day: {:?}", world_copy.env_cond.get_time_of_day()));
+                                        ui.text_wrapped(format!("Weather: {:?}", world_copy.env_cond.get_weather_condition()));
 
                                         ui.unindent();
                                     }

@@ -33,12 +33,12 @@ impl KeyboardEventHandler {
             look_speed,
 
             explanation:
-"WASD control camera movement;
-arrows control camera rotation;
-N advances the game by a single tick;
-M toggles continuous execution of the game.
-F finds the robot and moves the camera to it
-G toggles following the robot with the camera".into()
+"WASD: control camera movement;
+arrows: control camera rotation;
+N: advance the game by a single tick;
+M: toggle continuous execution of the game.
+F: find the robot and move the camera to it
+G: toggle following the robot with the camera".into()
         }
     }
 

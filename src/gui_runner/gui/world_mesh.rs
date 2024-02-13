@@ -1,5 +1,5 @@
 use std::cmp::max;
-use std::collections::{HashMap};
+use std::collections::{HashMap, HashSet};
 use std::ops::{Range, RangeFrom};
 use glium::{Display, VertexBuffer};
 use nalgebra_glm::{UVec2, Vec3, vec3};
@@ -177,7 +177,7 @@ impl WorldMesh {
 
         Self { vertices, vbo, world_size, content_meshes_indices_map, empty_content_meshes }
     }
-    pub fn update(&mut self, world: &mut PartialWorld, display: &Display) {
+    pub fn update(&mut self, world: &mut PartialWorld, tiles_to_refresh: &HashSet<UVec2>, display: &Display) {
         assert_eq!(self.world_size, world.world.len());
         let color_displace_amount = 0.1;
         let position_displace_amount = 0.1;
@@ -224,7 +224,7 @@ impl WorldMesh {
             self.vertices[0..Self::VERTICES_IN_ROBOT_MESH].copy_from_slice(&robot_vertices);
         }
 
-        for tile_pos in world.tiles_to_refresh.iter().cloned() {
+        for tile_pos in tiles_to_refresh.iter().cloned() {
             if let Some(tile) = &world.world[tile_pos.x as usize][tile_pos.y as usize] {
                 //tile vertices
                 {
@@ -276,7 +276,6 @@ impl WorldMesh {
 
             }
         }
-        world.tiles_to_refresh.clear();
 
         self.update_vbo(&display);
     }

@@ -37,22 +37,6 @@ impl Runnable for RobotWrapper {
         world_ref.backpack = self.get_backpack().get_contents().clone();
 
         world_ref.changed = true;
-
-        let max_coord = (world_ref.world.len() - 1) as i32;
-        let x = world_ref.robot_position.x as i32;
-        let y = world_ref.robot_position.y as i32;
-
-        //tiles to be refreshed in the mesh
-        let min_x = max(x-2, 0);
-        let min_y = max(y-2, 0);
-        let max_x = min(x+2, max_coord);
-        let max_y = min(y+2, max_coord);
-
-        for x in min_x..=max_x {
-            for y in min_y..=max_y {
-                world_ref.tiles_to_refresh.insert(UVec2::new(x as u32, y as u32));
-            }
-        }
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -64,6 +48,7 @@ impl Runnable for RobotWrapper {
             Event::TimeChanged(env_cond) => {
                 self.world.lock().unwrap().env_cond = env_cond.clone();
             }
+            Event::Moved(_a, b) => { println!("moved to {b:?}"); }
             e => println!("RobotWrapper caught event {e:?}"),
         }
     }

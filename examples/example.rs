@@ -22,10 +22,15 @@ impl ExampleRobot {
 impl Runnable for ExampleRobot {
     fn process_tick(&mut self, world: &mut World) {
         let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
-        let random_direction = random::<usize>() % 4;
-        let random_direction = directions[random_direction].clone();
+        loop {
+            let random_direction = random::<usize>() % 4;
+            let random_direction = directions[random_direction].clone();
 
-        robotics_lib::interface::go(self, world, random_direction).map(|_| 0).unwrap_or(0);
+            match robotics_lib::interface::go(self, world, random_direction).map(|_| 0) {
+                Ok(_) => {}
+                Err(_) => {break;}
+            }
+        }
     }
 
     fn handle_event(&mut self, _event: Event) {}
