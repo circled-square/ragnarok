@@ -6,7 +6,7 @@ mod frame_delta_timer;
 use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender};
 use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
 use imgui::{Condition, SliderFlags, TreeNodeFlags};
@@ -19,7 +19,7 @@ use winit::platform::unix::EventLoopBuilderExtUnix;
 use world_mesh::{WorldMesh};
 use crate::gui_runner::gui::frame_delta_timer::FrameDeltaTimer;
 use crate::gui_runner::gui::keyboard_event_handler::{KeyboardEventHandler, ProcessedKeyboardInput};
-use super::{PartialWorld, RunMode};
+use super::{RunMode, PartialWorld};
 
 
 const UP : Vec3 = Vec3::new(0.0, 1.0, 0.0);
@@ -49,7 +49,10 @@ pub fn proj_matrix(frame: &Frame, fov: f32) -> Mat4 {
 }
 
 pub struct GUI {
-    world: Arc<Mutex<PartialWorld>>,
+    // world: Arc<Mutex<SharedState>>,
+    rx_from_game: Receiver<PartialWorld>,
+    tx_to_game: Sender<RunMode>,
+    world_copy: PartialWorld,
 
     event_loop: EventLoop<()>,
     display: Display,
@@ -64,7 +67,7 @@ pub struct GUI {
 }
 
 impl GUI {
-    pub fn new(world: Arc<Mutex<PartialWorld>>, window_title: &str) -> Self {
+    pub fn new(window_title: &str, rx_from_game: Receiver<PartialWorld>, tx_to_game: Sender<RunMode>) -> Self {
         let event_loop =
             winit::event_loop::EventLoopBuilder::new()
             .with_any_thread(true)
@@ -84,25 +87,30 @@ impl GUI {
         imgui_platform.attach_window(imgui_ctx.io_mut(), &display.gl_window().window(), HiDpiMode::Default);
 
         let imgui_renderer = imgui_glium_renderer::Renderer::init(&mut imgui_ctx, &display).unwrap();
-        let world_size = world.lock().unwrap().world.len();
+        let world_copy = rx_from_game.recv().unwrap();
+        let world_size = world_copy.world.len();
         let world_mesh = WorldMesh::new(&display, world_size);
         let shader_program = shaders::make_program(&display).unwrap();
 
         let kbd_event_handler = KeyboardEventHandler::new(50.0, 1.0);
 
-        Self { world, event_loop, display, imgui_ctx, imgui_platform, imgui_renderer, world_mesh, shader_program, kbd_event_handler }
+        Self { rx_from_game, tx_to_game, world_copy, event_loop, display, imgui_ctx, imgui_platform, imgui_renderer, world_mesh, shader_program, kbd_event_handler }
     }
 
     pub fn run(mut self) -> () {
         let mut kbd_input = ProcessedKeyboardInput::default();
 
-        let (initial_robot_pos, elevation) = {
-            let world = self.world.lock().unwrap();
-            (world.robot_position, world.world[world.robot_position.x as usize][world.robot_position.y as usize].as_ref().unwrap().elevation)
-        };
 
-        let mut cam_dir = vec3(-1.0, -1.0, -1.0).normalize();
-        let mut cam_pos = vec3(initial_robot_pos.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), initial_robot_pos.y as f32) - cam_dir * 30.0;
+        let (mut cam_dir, mut cam_pos) = {
+            let robot_pos = self.world_copy.robot_position;
+            let elevation = {
+                let w = &self.world_copy;
+                w.world[w.robot_position.x as usize][w.robot_position.y as usize].as_ref().unwrap().elevation
+            };
+            let cam_dir = vec3(-1.0, -1.0, -1.0).normalize();
+            let cam_pos = vec3(robot_pos.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), robot_pos.y as f32) - cam_dir * 30.0;
+            (cam_dir, cam_pos)
+        };
 
         let mut frame_delta_timer = FrameDeltaTimer::new();
 
@@ -110,8 +118,13 @@ impl GUI {
         let mut last_was_uncapped = false;
         let mut follow_robot = false;
         let mut find_robot = false;
-        let mut world_copy = PartialWorld::new();
         let mut tiles_to_refresh = HashSet::new();
+        for x in max(self.world_copy.robot_position.x, 1) - 1..=min(self.world_copy.robot_position.x + 1, self.world_copy.world.len() as u32 - 1) {
+            for y in max(self.world_copy.robot_position.y, 1) - 1..=min(self.world_copy.robot_position.y + 1, self.world_copy.world.len() as u32 - 1) {
+                tiles_to_refresh.insert(vec2(x,y));
+            }
+        }
+        let mut run_mode = RunMode::Paused;
 
         self.event_loop.run(move |ev, _window_target, _control_flow| {
             self.imgui_platform.handle_event(self.imgui_ctx.io_mut(), &self.display.gl_window().window(), &ev);
@@ -119,7 +132,8 @@ impl GUI {
                 //close requests and keyboard input
                 winit::event::Event::WindowEvent { event, .. } => match event {
                     winit::event::WindowEvent::CloseRequested => {
-                        self.world.lock().unwrap().run_mode = RunMode::Terminate;
+                        run_mode = RunMode::Terminate;
+                        self.tx_to_game.send(run_mode).unwrap();
 
                         _control_flow.set_exit();
                     },
@@ -127,17 +141,17 @@ impl GUI {
                         kbd_input = self.kbd_event_handler.process_input(input);
 
                         if kbd_input.toggle_continuous_mode {
-                            let mut world_ref = self.world.lock().unwrap();
-                            world_ref.run_mode = match &world_ref.run_mode {
+                            run_mode = match &run_mode {
                                 RunMode::Continuous(_) => RunMode::Paused,
                                 _ => {
                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
                                     RunMode::Continuous(cap)
                                 }
                             };
+                            self.tx_to_game.send(run_mode).unwrap();
                         } else if kbd_input.single_tick {
-                            let mut world_ref = self.world.lock().unwrap();
-                            world_ref.run_mode = RunMode::SingleTick;
+                            run_mode = RunMode::SingleTick;
+                            self.tx_to_game.send(run_mode).unwrap();
                         }
                         if kbd_input.toggle_follow_robot {
                             follow_robot = !follow_robot;
@@ -152,42 +166,35 @@ impl GUI {
 
                     //update world_copy
                     {
-                        let mut world_ref = self.world.lock().unwrap();
-                        if world_ref.changed {
-                            if !world_copy.is_null() {
-                                for x in 0..world_ref.world.len() {
-                                    for y in 0..world_ref.world.len() {
-                                        if world_ref.world[x][y] != world_copy.world[x][y] {
-                                            for x in max(x, 1)-1..=min(x+1, world_ref.world.len()-1) {
-                                                for y in max(y, 1)-1..=min(y+1, world_ref.world.len()-1) {
-                                                    tiles_to_refresh.insert(vec2(x as u32, y as u32));
-                                                }
+                        let new_world = self.rx_from_game.try_iter().last();
+
+                        if let Some(new_world) = new_world {
+                            for x in 0..new_world.world.len() {
+                                for y in 0..new_world.world.len() {
+                                    if new_world.world[x][y] != self.world_copy.world[x][y] {
+                                        for x in max(x, 1) - 1..=min(x + 1, new_world.world.len() - 1) {
+                                            for y in max(y, 1) - 1..=min(y + 1, new_world.world.len() - 1) {
+                                                tiles_to_refresh.insert(vec2(x as u32, y as u32));
                                             }
-                                        }
-                                    }
-                                }
-                            } else {
-                                for x in 0..world_ref.world.len() {
-                                    for y in 0..world_ref.world.len() {
-                                        if world_ref.world[x][y].is_some() {
-                                            tiles_to_refresh.insert(vec2(x as u32, y as u32));
                                         }
                                     }
                                 }
                             }
 
-                            world_copy = world_ref.clone();
-                            assert!(world_copy.changed);
-                            world_ref.changed = false;
+                            self.world_copy = new_world;
                         }
                     }
 
+                    //move camera
                     if find_robot || follow_robot {
-                        cam_pos = vec3(world_copy.robot_position.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), world_copy.robot_position.y as f32) - cam_dir * 30.0;
+                        let w = &self.world_copy;
+                        let elevation = w.world[w.robot_position.x as usize][w.robot_position.y as usize].as_ref().unwrap().elevation;
+                        cam_pos = vec3(self.world_copy.robot_position.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), self.world_copy.robot_position.y as f32) - cam_dir * 30.0;
 
                         find_robot = false;
+                    } else {
+                        kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta, UP);
                     }
-                    kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta, UP);
 
                     //rendering
                     {
@@ -204,6 +211,9 @@ impl GUI {
                                 write: true,
                                 .. Default::default()
                             },
+                            multisampling: false,
+                            dithering: false,
+
                             .. Default::default()
                         };
 
@@ -212,12 +222,8 @@ impl GUI {
                         //render world
                         {
                             // update vbo with new world information
-                            if world_copy.changed {
-                                self.world_mesh.update(&mut world_copy, &tiles_to_refresh, &self.display);
-                                tiles_to_refresh.clear();
-
-                                world_copy.changed = false;
-                            }
+                            self.world_mesh.update(&mut self.world_copy, &tiles_to_refresh, &self.display);
+                            tiles_to_refresh.clear();
 
                             target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList), &self.shader_program,&uniform! { mvp:  *mvp.as_ref() }, &params).unwrap();
                         }
@@ -234,11 +240,11 @@ impl GUI {
                                     if ui.collapsing_header("Simulation settings", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
 
-                                        match world_copy.run_mode {
+                                        match run_mode {
                                             RunMode::Continuous(_) => {
                                                 if ui.button("Stop") {
-                                                    let mut world_ref = self.world.lock().unwrap();
-                                                    world_ref.run_mode = RunMode::Paused;
+                                                    run_mode = RunMode::Paused;
+                                                    self.tx_to_game.send(run_mode).unwrap();
                                                 } else {
                                                     let mut changed = false;
                                                     changed = changed || ui.checkbox("Uncapped?", &mut last_was_uncapped);
@@ -251,21 +257,21 @@ impl GUI {
 
                                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
                                                     if changed {
-                                                        let mut world_ref = self.world.lock().unwrap();
-                                                        world_ref.run_mode = RunMode::Continuous(cap);
+                                                        run_mode = RunMode::Continuous(cap);
+                                                        self.tx_to_game.send(run_mode).unwrap();
                                                     }
                                                 }
                                             }
                                             RunMode::SingleTick | RunMode::Paused => {
                                                 if ui.button("Run") {
                                                     let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                                    let mut world_ref = self.world.lock().unwrap();
-                                                    world_ref.run_mode = RunMode::Continuous(cap);
+                                                    run_mode = RunMode::Continuous(cap);
+                                                    self.tx_to_game.send(run_mode).unwrap();
                                                 } else {
                                                     ui.same_line();
                                                     if ui.button("Run single tick") {
-                                                        let mut world_ref = self.world.lock().unwrap();
-                                                        world_ref.run_mode = RunMode::SingleTick;
+                                                        run_mode = RunMode::SingleTick;
+                                                        self.tx_to_game.send(run_mode).unwrap();
                                                     }
                                                 }
                                             }
@@ -286,15 +292,15 @@ impl GUI {
 
                                         ui.text_wrapped("Energy:");
                                         ui.same_line();
-                                        imgui::ProgressBar::new(world_copy.energy as f32 / 1000.0)
-                                            .overlay_text(format!("{}", world_copy.energy))
+                                        imgui::ProgressBar::new(self.world_copy.energy as f32 / 1000.0)
+                                            .overlay_text(format!("{}", self.world_copy.energy))
                                             .build(&ui);
 
                                         let mut backpack_is_empty = true;
                                         if ui.collapsing_header("Backpack:", TreeNodeFlags::DEFAULT_OPEN) {
                                             ui.indent();
 
-                                            for (k, v) in world_copy.backpack.iter() {
+                                            for (k, v) in self.world_copy.backpack.iter() {
                                                 if *v != 0 {
                                                     ui.text_wrapped(format!("{k}: {v}"));
                                                     backpack_is_empty = false;
@@ -315,15 +321,15 @@ impl GUI {
                                     if ui.collapsing_header("Environmental conditions", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
 
-                                        ui.text_wrapped(format!("Time of day: {:?}", world_copy.env_cond.get_time_of_day()));
-                                        ui.text_wrapped(format!("Weather: {:?}", world_copy.env_cond.get_weather_condition()));
+                                        ui.text_wrapped(format!("Time of day: {:?}", self.world_copy.env_cond.get_time_of_day()));
+                                        ui.text_wrapped(format!("Weather: {:?}", self.world_copy.env_cond.get_weather_condition()));
 
                                         ui.unindent();
                                     }
 
                                     ui.separator();
 
-                                    if ui.collapsing_header("Controls", TreeNodeFlags::DEFAULT_OPEN) {
+                                    if ui.collapsing_header("Controls", TreeNodeFlags::empty()) {
                                         ui.indent();
                                         ui.text_wrapped(self.kbd_event_handler.get_explanation());
                                         ui.unindent();
@@ -341,7 +347,7 @@ impl GUI {
                         target.finish().unwrap();
                     }
                 },
-                _ => (),
+                _ => {}
             }
         });
     }

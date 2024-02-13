@@ -6,8 +6,8 @@ use nalgebra_glm::{UVec2, Vec3, vec3};
 use rand::prelude::SmallRng;
 use rand::{Rng, SeedableRng};
 use robotics_lib::world::tile::{Content, Tile, TileType};
-use crate::gui_runner::PartialWorld;
 use num_traits::Float;
+use crate::gui_runner::PartialWorld;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Vertex {

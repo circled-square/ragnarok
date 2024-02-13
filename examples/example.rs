@@ -26,9 +26,9 @@ impl Runnable for ExampleRobot {
             let random_direction = random::<usize>() % 4;
             let random_direction = directions[random_direction].clone();
 
-            match robotics_lib::interface::go(self, world, random_direction).map(|_| 0) {
+            match robotics_lib::interface::go(self, world, random_direction.clone()).map(|_| 0) {
                 Ok(_) => {}
-                Err(_) => {break;}
+                Err(_) => break,
             }
         }
     }
@@ -45,7 +45,7 @@ impl Runnable for ExampleRobot {
 
 fn main() {
     let robot = ExampleRobot::new();
-    let mut world_generator = MyWorldGen::new_param(200, 1, 1, 1, false, false, 0, false, Some(1));
+    let mut world_generator = MyWorldGen::new_param(200, 1, 1, 1, false, false, 0, false, None);
 
     let gui_runner = GuiRunner::new(Box::new(robot), &mut world_generator).unwrap();
 

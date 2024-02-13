@@ -1,19 +1,18 @@
 mod robot_wrapper;
 mod gui;
-mod interface;
 
-
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::collections::{HashMap};
+use std::{sync, thread};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 use nalgebra_glm::UVec2;
 use robotics_lib::runner::{Runnable, Runner};
 use robotics_lib::utils::LibError;
-use robotics_lib::world::environmental_conditions::{EnvironmentalConditions, WeatherType};
+use robotics_lib::world::environmental_conditions::{EnvironmentalConditions};
 use robotics_lib::world::tile::{Content, Tile};
 use robotics_lib::world::world_generator::Generator;
 use robot_wrapper::RobotWrapper;
+use crate::gui_runner::gui::GUI;
 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,68 +30,45 @@ pub(crate) struct PartialWorld {
     pub energy: usize,
     pub backpack: HashMap<Content, usize>,
     pub env_cond: EnvironmentalConditions,
-    pub changed: bool,
-
-    pub run_mode: RunMode,
 }
-impl PartialWorld {
-    pub fn new() -> Self {
-        let ret = Self {
-            world: vec![],
-            changed: false,
-            robot_position: UVec2::default(),
-            run_mode: RunMode::Paused,
-            energy: 0,
-            backpack: HashMap::new(),
-            env_cond: EnvironmentalConditions::new(&[WeatherType::Sunny], 0, 0).unwrap(),
-        };
-        ret
-    }
-    pub fn is_null(&self) -> bool {
-        self.world.len() == 0
-    }
-}
-
 pub struct GuiRunner {
     runner: Runner,
-    partial_world: Arc<Mutex<PartialWorld>>,
+    from_game_rx: Receiver<PartialWorld>,
+    to_game_tx: Sender<RunMode>,
+    from_gui_rx: Receiver<RunMode>,
 }
 impl GuiRunner {
     pub fn new(robot: Box<dyn Runnable>, generator: &mut impl Generator) -> Result<GuiRunner, LibError> {
-        let partial_world = Arc::new(Mutex::new(PartialWorld::new()));
+        let (to_gui_tx, from_game_rx) = sync::mpsc::channel::<PartialWorld>();
+        let (to_game_tx, from_gui_rx) = sync::mpsc::channel::<RunMode>();
 
-        let robot_wrapper = RobotWrapper::new(robot, partial_world.clone());
+        let robot_wrapper = RobotWrapper::new(robot, to_gui_tx);
+
         let mut runner = Runner::new(Box::new(robot_wrapper), generator)?;
         runner.game_tick()?; // first tick needed to fully init partial_world
 
-        Ok(Self { runner, partial_world })
+        Ok(Self { runner, from_game_rx, to_game_tx, from_gui_rx })
     }
 
     pub fn run(mut self) -> Result<(), LibError> {
-        let gui_partial_world = self.partial_world.clone();
         let gui_thread_handle = thread::spawn(move || {
-            let gui = gui::GUI::new(gui_partial_world, "Visualizer");
+            let gui = GUI::new("Ragnarok", self.from_game_rx, self.to_game_tx);
             gui.run();
         });
 
         let mut last_tick_begin = std::time::Instant::now();
+        let mut run_mode = RunMode::Paused;
         'main_game_loop: loop {
 
             loop {
-                let run_mode = {
-                    let mut world = self.partial_world.lock().unwrap();
-                    match world.run_mode {
-                        RunMode::SingleTick => {
-                            world.run_mode = RunMode::Paused;
-                            break;
-                        }
-                        RunMode::Continuous(None) => break,
-                        RunMode::Terminate => break 'main_game_loop,
-                        run_mode => run_mode, //run_mode is either Continuous(Some(_)) or Paused; either way release the lock
-                    }
-                };
-                // capped continuous mode and paused are handled separately bacause we need to release the lock before we call thread::sleep
+                run_mode = self.from_gui_rx.try_recv().unwrap_or(run_mode);
                 match run_mode {
+                    RunMode::SingleTick => {
+                        run_mode = RunMode::Paused;
+                        break;
+                    }
+                    RunMode::Continuous(None) => break,
+                    RunMode::Terminate => break 'main_game_loop,
                     RunMode::Continuous(Some(cap)) => {
                         let interval = Duration::from_secs_f32(1.0 / cap);
                         let elapsed = last_tick_begin.elapsed();
@@ -104,7 +80,6 @@ impl GuiRunner {
                     RunMode::Paused => {
                         thread::sleep(Duration::from_millis(5));
                     }
-                    _ => unreachable!()
                 }
             }
 

@@ -1,23 +1,21 @@
-use std::cmp::{max, min};
-use std::sync::{Arc, Mutex};
-use nalgebra_glm::UVec2;
+use std::sync::mpsc::Sender;
 use robotics_lib::energy::Energy;
 use robotics_lib::event::events::Event;
 use robotics_lib::runner::backpack::BackPack;
 use robotics_lib::runner::Runnable;
 use robotics_lib::world::coordinates::Coordinate;
 use robotics_lib::world::World;
+use crate::gui_runner::PartialWorld;
 use crate::utils::coord_to_robot_position;
-use super::PartialWorld;
 
 pub struct RobotWrapper {
-    pub ai: Box<dyn Runnable>,
-    pub world: Arc<Mutex<PartialWorld>>,
-    pub is_first_tick: bool
+    ai: Box<dyn Runnable>,
+    to_gui_tx: Sender<PartialWorld>,
+    is_first_tick: bool,
 }
 impl RobotWrapper {
-    pub fn new(ai: Box<dyn Runnable>, world: Arc<Mutex<PartialWorld>>) -> Self {
-        Self { ai, world, is_first_tick: true }
+    pub fn new(ai: Box<dyn Runnable>, to_gui_tx: Sender<PartialWorld>) -> Self {
+        Self { ai, to_gui_tx, is_first_tick: true }
     }
 }
 impl Runnable for RobotWrapper {
@@ -29,14 +27,14 @@ impl Runnable for RobotWrapper {
             self.is_first_tick = false;
         }
 
-        let mut world_ref = self.world.lock().unwrap();
-
-        world_ref.robot_position = coord_to_robot_position(self.get_coordinate());
-        world_ref.world = robotics_lib::interface::robot_map(world).unwrap();
-        world_ref.energy = self.get_energy().get_energy_level();
-        world_ref.backpack = self.get_backpack().get_contents().clone();
-
-        world_ref.changed = true;
+        let world_data = PartialWorld{
+            world: robotics_lib::interface::robot_map(world).unwrap(),
+            robot_position: coord_to_robot_position(self.get_coordinate()),
+            energy: self.get_energy().get_energy_level(),
+            backpack: self.get_backpack().get_contents().clone(),
+            env_cond: robotics_lib::interface::look_at_sky(&world),
+        };
+        self.to_gui_tx.send(world_data).unwrap();
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -44,11 +42,7 @@ impl Runnable for RobotWrapper {
 
         match &event {
             //ignore these events
-            Event::Ready | Event::DayChanged(_) | Event::EnergyRecharged(_) => {}
-            Event::TimeChanged(env_cond) => {
-                self.world.lock().unwrap().env_cond = env_cond.clone();
-            }
-            Event::Moved(_a, b) => { println!("moved to {b:?}"); }
+            Event::Ready | Event::Moved(_,_) | Event::DayChanged(_) | Event::EnergyRecharged(_)  | Event::TimeChanged(_) => {}
             e => println!("RobotWrapper caught event {e:?}"),
         }
     }

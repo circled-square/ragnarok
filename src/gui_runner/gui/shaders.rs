@@ -6,7 +6,7 @@ pub fn make_program(display: &glium::Display) -> Result<glium::Program, glium::P
             in vec3 position;
             in vec3 color;
 
-            out vec3 v_color;
+            flat out vec3 v_color;
 
             uniform mat4 mvp;
 
@@ -19,7 +19,7 @@ pub fn make_program(display: &glium::Display) -> Result<glium::Program, glium::P
     let frag_shader_src = {r#"
             #version 150
 
-            in vec3 v_color;
+            flat in vec3 v_color;
             out vec4 color;
             uniform vec3 u_light;
 
