@@ -151,9 +151,25 @@ impl WorldMesh {
         }
         //do nothing if the hashmap agrees there is no content
     }
-    fn update_vbo(&mut self, display: &Display) {
+    fn update_vbo_slice(&mut self, range: Range<usize>) {
+        let vbo_slice = self.vbo.slice(range.clone()).unwrap();
+        vbo_slice.write(&self.vertices[range]);
+    }
+    fn update_vbo(&mut self, tiles_to_refresh: &HashSet<UVec2>, display: &Display) {
         if self.vbo.len() == self.vertices.len() {
-            self.vbo.write(&self.vertices);
+            self.update_vbo_slice( 0..Self::VERTICES_IN_ROBOT_MESH);
+
+            for tile_pos in tiles_to_refresh {
+                let tile_mesh_position = Self::VERTICES_IN_ROBOT_MESH + (tile_pos.y as usize * self.world_size + tile_pos.x as usize) * Self::VERTICES_PER_TILE;
+                self.update_vbo_slice(tile_mesh_position..tile_mesh_position+Self::VERTICES_PER_TILE);
+            }
+
+            for tile_pos in tiles_to_refresh {
+                if let Some((content_mesh_pos, _)) = self.content_meshes_indices_map.get(&(tile_pos.x, tile_pos.y)) {
+                    let content_mesh_pos= *content_mesh_pos;
+                    self.update_vbo_slice(content_mesh_pos..content_mesh_pos+Self::VERTICES_IN_CONTENT_MESH);
+                }
+            }
         } else {
             self.vbo = VertexBuffer::dynamic(display, &self.vertices).unwrap();
         }
@@ -277,7 +293,7 @@ impl WorldMesh {
             }
         }
 
-        self.update_vbo(&display);
+        self.update_vbo(tiles_to_refresh, display);
     }
 
     fn content_to_mesh(c: &Content, tile_pos: UVec2, elevation: usize) -> Option<[Vertex; Self::VERTICES_IN_CONTENT_MESH]> {
