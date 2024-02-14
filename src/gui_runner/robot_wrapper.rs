@@ -1,4 +1,5 @@
-use std::sync::mpsc::Sender;
+use std::collections::HashSet;
+use std::sync::mpsc::{SyncSender};
 use robotics_lib::energy::Energy;
 use robotics_lib::event::events::Event;
 use robotics_lib::runner::backpack::BackPack;
@@ -10,11 +11,11 @@ use crate::utils::coord_to_robot_position;
 
 pub struct RobotWrapper {
     ai: Box<dyn Runnable>,
-    to_gui_tx: Sender<PartialWorld>,
+    to_gui_tx: SyncSender<PartialWorld>,
     is_first_tick: bool,
 }
 impl RobotWrapper {
-    pub fn new(ai: Box<dyn Runnable>, to_gui_tx: Sender<PartialWorld>) -> Self {
+    pub fn new(ai: Box<dyn Runnable>, to_gui_tx: SyncSender<PartialWorld>) -> Self {
         Self { ai, to_gui_tx, is_first_tick: true }
     }
 }
@@ -29,6 +30,7 @@ impl Runnable for RobotWrapper {
 
         let world_data = PartialWorld{
             world: robotics_lib::interface::robot_map(world).unwrap(),
+            tiles_to_refresh: HashSet::new(),
             robot_position: coord_to_robot_position(self.get_coordinate()),
             energy: self.get_energy().get_energy_level(),
             backpack: self.get_backpack().get_contents().clone(),

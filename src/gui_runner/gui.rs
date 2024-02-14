@@ -3,24 +3,38 @@ mod shaders;
 mod keyboard_event_handler;
 mod frame_delta_timer;
 
-use std::cmp::{max, min};
-use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::mpsc::{Receiver, Sender};
+use std::thread;
 use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
 use imgui::{Condition, SliderFlags, TreeNodeFlags};
 use imgui_winit_support::HiDpiMode;
-use winit::event_loop::{EventLoop};
+use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 use nalgebra_glm as glm;
-use glm::{Mat4, Vec3, vec3, vec2};
+use glm::{Mat4, Vec3, vec3};
 use winit::platform::unix::EventLoopBuilderExtUnix;
-use world_mesh::{WorldMesh};
+use world_mesh::WorldMesh;
 use crate::gui_runner::gui::frame_delta_timer::FrameDeltaTimer;
 use crate::gui_runner::gui::keyboard_event_handler::{KeyboardEventHandler, ProcessedKeyboardInput};
-use super::{RunMode, PartialWorld};
+use super::{PartialWorld, RunMode};
 
+pub struct GUIThread {
+    worker_to_gui_rx: Receiver<PartialWorld>,
+    gui_to_game_tx: Sender<RunMode>,
+}
+impl GUIThread {
+    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: Sender<RunMode>) -> Self {
+        Self { worker_to_gui_rx, gui_to_game_tx }
+    }
+    pub fn start(self) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let gui = GUI::new("Ragnarok", self.worker_to_gui_rx, self.gui_to_game_tx);
+            gui.run();
+        })
+    }
+}
 
 const UP : Vec3 = Vec3::new(0.0, 1.0, 0.0);
 pub fn view_matrix(position: Vec3, direction: Vec3, up: Vec3) -> Mat4 {
@@ -88,8 +102,7 @@ impl GUI {
 
         let imgui_renderer = imgui_glium_renderer::Renderer::init(&mut imgui_ctx, &display).unwrap();
         let world_copy = rx_from_game.recv().unwrap();
-        let world_size = world_copy.world.len();
-        let world_mesh = WorldMesh::new(&display, world_size);
+        let world_mesh = WorldMesh::new(10, &display);
         let shader_program = shaders::make_program(&display).unwrap();
 
         let kbd_event_handler = KeyboardEventHandler::new(50.0, 1.0);
@@ -99,8 +112,6 @@ impl GUI {
 
     pub fn run(mut self) -> () {
         let mut kbd_input = ProcessedKeyboardInput::default();
-
-
         let (mut cam_dir, mut cam_pos) = {
             let robot_pos = self.world_copy.robot_position;
             let elevation = {
@@ -118,12 +129,7 @@ impl GUI {
         let mut last_was_uncapped = false;
         let mut follow_robot = false;
         let mut find_robot = false;
-        let mut tiles_to_refresh = HashSet::new();
-        for x in max(self.world_copy.robot_position.x, 1) - 1..=min(self.world_copy.robot_position.x + 1, self.world_copy.world.len() as u32 - 1) {
-            for y in max(self.world_copy.robot_position.y, 1) - 1..=min(self.world_copy.robot_position.y + 1, self.world_copy.world.len() as u32 - 1) {
-                tiles_to_refresh.insert(vec2(x,y));
-            }
-        }
+
         let mut run_mode = RunMode::Paused;
 
         self.event_loop.run(move |ev, _window_target, _control_flow| {
@@ -169,18 +175,6 @@ impl GUI {
                         let new_world = self.rx_from_game.try_iter().last();
 
                         if let Some(new_world) = new_world {
-                            for x in 0..new_world.world.len() {
-                                for y in 0..new_world.world.len() {
-                                    if new_world.world[x][y] != self.world_copy.world[x][y] {
-                                        for x in max(x, 1) - 1..=min(x + 1, new_world.world.len() - 1) {
-                                            for y in max(y, 1) - 1..=min(y + 1, new_world.world.len() - 1) {
-                                                tiles_to_refresh.insert(vec2(x as u32, y as u32));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
                             self.world_copy = new_world;
                         }
                     }
@@ -222,8 +216,8 @@ impl GUI {
                         //render world
                         {
                             // update vbo with new world information
-                            self.world_mesh.update(&mut self.world_copy, &tiles_to_refresh, &self.display);
-                            tiles_to_refresh.clear();
+                            self.world_mesh.update(&mut self.world_copy, &self.display);
+                            self.world_copy.tiles_to_refresh.clear();
 
                             target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList), &self.shader_program,&uniform! { mvp:  *mvp.as_ref() }, &params).unwrap();
                         }

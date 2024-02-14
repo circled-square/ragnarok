@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 pub struct FrameDeltaTimer {
     last_frame_time: SystemTime,
-    circular_queue_deltas: [f32; 30],
+    circular_queue_deltas: [f32; 600],
     circular_queue_cursor: usize,
 }
 
@@ -10,7 +10,7 @@ impl FrameDeltaTimer {
     pub fn new() -> Self {
         Self {
             last_frame_time: SystemTime::now(),
-            circular_queue_deltas: [0.0; 30],
+            circular_queue_deltas: [0.0; 600],
             circular_queue_cursor: 0,
         }
     }
@@ -27,6 +27,19 @@ impl FrameDeltaTimer {
     }
 
     pub fn get_average_fps(&self) -> f32 {
-        1.0 / (self.circular_queue_deltas.iter().sum::<f32>() / self.circular_queue_deltas.len() as f32)
+        let mut sum = 0.0;
+        let mut number_of_deltas_summed = 0;
+        let iter_1 = self.circular_queue_deltas[..self.circular_queue_cursor].iter().rev();
+        let iter_2 = self.circular_queue_deltas[self.circular_queue_cursor..].iter().rev();
+
+        for delta in iter_1.chain(iter_2).cloned() {
+            sum += delta;
+            number_of_deltas_summed += 1;
+            if sum >= 1.0 {
+                break;
+            }
+        }
+
+        (number_of_deltas_summed as f32) / sum
     }
 }

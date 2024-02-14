@@ -1,12 +1,13 @@
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
-use std::ops::{Range, RangeFrom};
+use std::ops::{Range};
 use glium::{Display, VertexBuffer};
 use nalgebra_glm::{UVec2, Vec3, vec3};
 use rand::prelude::SmallRng;
 use rand::{Rng, SeedableRng};
 use robotics_lib::world::tile::{Content, Tile, TileType};
 use num_traits::Float;
+use range_set::range_set;
 use crate::gui_runner::PartialWorld;
 
 #[derive(Clone, Copy, Debug)]
@@ -22,181 +23,197 @@ impl Vertex {
 }
 implement_vertex!(Vertex, position, color);
 
+pub(crate) type WorldMesh = MeshVector;
 
-pub(crate) struct WorldMesh {
+
+pub(crate) struct MeshVector {
     pub vbo: VertexBuffer<Vertex>,
-    vertices: Vec<Vertex>,
-    world_size: usize,
+    pub verts: Vec<Vertex>,
 
-    content_meshes_indices_map: HashMap<(u32, u32), (usize, Content)>,
-    empty_content_meshes: Vec<usize>, // content meshes tagged for replacement
+    empty_meshes: Vec<usize>,
+    min_number_of_meshes: usize,
+    tiles_positions_map: HashMap<UVec2, (Tile, [u32;3])>, // keeps track of the association between world position and (stored meshes, [tile index, content_idx1, content_idx2]); 0 == null (since the 0 mesh is the robot mesh)
 }
-impl WorldMesh {
-    const TRIS_PER_TILE : usize = 8;
-    const VERTICES_PER_TILE : usize = Self::TRIS_PER_TILE * 3;
+impl MeshVector {
+    const MESH_LEN: usize = 24;
 
-    const TRIS_IN_ROBOT_MESH : usize = 8;
-    const VERTICES_IN_ROBOT_MESH : usize = Self::TRIS_IN_ROBOT_MESH * 3;
-
-    const TRIS_IN_CONTENT_MESH : usize = 16;
-    const VERTICES_IN_CONTENT_MESH : usize = Self::TRIS_IN_CONTENT_MESH * 3;
-
-    #[allow(unused)]
-    fn robot_mesh(&self) -> Range<usize> { 0..Self::VERTICES_IN_ROBOT_MESH }
-    #[allow(unused)]
-    fn tiles_mesh(&self) -> Range<usize> { Self::VERTICES_IN_ROBOT_MESH..Self::VERTICES_IN_ROBOT_MESH+Self::VERTICES_PER_TILE*self.world_size*self.world_size }
-    fn content_meshes(&self) -> RangeFrom<usize> { Self::VERTICES_IN_ROBOT_MESH+Self::VERTICES_PER_TILE*self.world_size*self.world_size.. }
-    fn content_meshes_slice(&self) -> &[Vertex] {
-        let content_meshes_range = self.content_meshes();
-        &self.vertices[content_meshes_range]
-    }
-    fn content_meshes_slice_mut(&mut self) -> &mut [Vertex] {
-        let content_meshes_range = self.content_meshes();
-        &mut self.vertices[content_meshes_range]
-    }
-    fn null_content_mesh() -> [Vertex; Self::VERTICES_IN_CONTENT_MESH] { [Vertex::null(); Self::VERTICES_IN_CONTENT_MESH] }
-
-    fn min_number_of_empty_content_meshes(world_size: usize) -> usize {
-        world_size.next_power_of_two() / 4
+    pub fn new(min_number_of_meshes: usize, display: &Display) -> Self {
+        Self {
+            vbo: VertexBuffer::empty_dynamic(display, min_number_of_meshes*Self::MESH_LEN).unwrap(),
+            verts: vec![Vertex::null(); min_number_of_meshes * Self::MESH_LEN],
+            empty_meshes: Vec::from_iter((1..min_number_of_meshes).map(|i| i * Self::MESH_LEN)),
+            tiles_positions_map: HashMap::new(),
+            min_number_of_meshes
+        }
     }
 
-    fn increase_content_meshes_size(&mut self) {
-        //number of null content meshes to add to the storage
-        let content_meshes_len = self.content_meshes_slice().len();
-        let reallocation_size_difference = max(8, content_meshes_len / Self::VERTICES_IN_CONTENT_MESH / 2);
-        let content_meshes_start = self.content_meshes().start;
-        let content_meshes_end = content_meshes_start + content_meshes_len;
-        assert_eq!(content_meshes_end, self.vertices.len());
+    fn get_mesh_at_index(&self, i: usize) -> &[Vertex] { &self.verts[i..i+Self::MESH_LEN] }
+    fn get_mut_mesh_at_index(&mut self, i: usize) -> &mut [Vertex] { &mut self.verts[i..i+Self::MESH_LEN] }
+    fn null_mesh() -> [Vertex; Self::MESH_LEN] { [Vertex::null(); Self::MESH_LEN] }
 
-        self.empty_content_meshes.reserve(reallocation_size_difference);
-        self.vertices.reserve_exact(reallocation_size_difference * Self::VERTICES_IN_CONTENT_MESH);
+    fn grow(&mut self) {
+        //number of null meshes to add to the storage
+        let reallocation_size_difference = max(1, self.verts.len() / Self::MESH_LEN / 2);
+
+        self.empty_meshes.reserve(reallocation_size_difference);
+        self.verts.reserve_exact(reallocation_size_difference * Self::MESH_LEN);
+
+        let _prev_number_of_verts = self.verts.len();
+
         for _ in 0..reallocation_size_difference {
-            self.empty_content_meshes.push(self.vertices.len());
-            self.vertices.extend_from_slice(&Self::null_content_mesh());
+            self.empty_meshes.push(self.verts.len());
+            self.verts.extend_from_slice(&Self::null_mesh());
         }
 
-        assert_eq!(self.vertices.len(), content_meshes_end + reallocation_size_difference * Self::VERTICES_IN_CONTENT_MESH);
+        assert_eq!(self.verts.len(), _prev_number_of_verts + reallocation_size_difference * Self::MESH_LEN);
     }
-    fn get_empty_content_mesh_or_realloc(&mut self) -> usize {
-        let mut was_none_case = false;
-        let ret = match self.empty_content_meshes.pop() {
+
+    fn get_null_mesh_or_grow(&mut self) -> usize {
+        let ret = match self.empty_meshes.pop() {
             Some(empty_content_mesh) => empty_content_mesh,
             None => {
-                self.increase_content_meshes_size();
-                was_none_case = true;
-                self.empty_content_meshes.pop().unwrap()
+                self.grow();
+                self.empty_meshes.pop().unwrap()
             }
         };
 
-        for (i,v) in self.vertices[ret..ret + Self::VERTICES_IN_CONTENT_MESH].iter().enumerate() {
-            assert!(v.is_null(), "{v:?} was_none_case? {was_none_case} i = {i}");
-        }
+        assert!(self.get_mesh_at_index(ret).iter().all(Vertex::is_null));
 
         ret
     }
-    fn insert_content_mesh(&mut self, tile_pos: UVec2, elevation: usize, content: Content) {
-        assert_ne!(content, Content::None);
 
-        let prev_content = self.content_meshes_indices_map.get_mut(&(tile_pos.x, tile_pos.y)).cloned();
-        let (content_mesh_index, do_write_vertices) = match prev_content {
-            None => (self.get_empty_content_mesh_or_realloc(), true),
-            Some((index, content_in_hashmap)) => (index, content_in_hashmap.index() != content.index()),
+    fn insert_mesh(&mut self, tile_pos: UVec2, tile: Tile, world: &Vec<Vec<Option<Tile>>>) {
+        let (prev_tile, mut meshes_indices) = match self.tiles_positions_map.get(&tile_pos).cloned() {
+            Some((prev_tile, meshes_indices)) => (Some(prev_tile), meshes_indices),
+            None => (None, [0,0,0]),
         };
 
+        let (should_insert_tile_mesh, should_insert_content_mesh) =
+            if let Some(prev_tile) = prev_tile {
+                (true, prev_tile.content.index() != tile.content.index())
+            } else {
+                (true, true)
+            };
 
-        if do_write_vertices {
-            if let Some(content_mesh) = Self::content_to_mesh(&content, tile_pos, elevation) {
-                self.vertices[content_mesh_index..content_mesh_index + Self::VERTICES_IN_CONTENT_MESH].copy_from_slice(&content_mesh);
+        if should_insert_tile_mesh {
+            if meshes_indices[0] == 0 {
+                meshes_indices[0] = self.get_null_mesh_or_grow() as u32;
             }
+            let tile_mesh_index = meshes_indices[0] as usize;
+            let tile_mesh = Self::get_tile_mesh(&tile, tile_pos, world);
+            self.get_mut_mesh_at_index(tile_mesh_index).copy_from_slice(&tile_mesh);
+        }
+        if should_insert_content_mesh {
+            let content_mesh = Self::get_content_mesh(&tile.content, tile_pos, tile.elevation);
+            if let Some(content_mesh) = content_mesh {
+                for i in 0..2 {
+                    if meshes_indices[i+1] == 0 {
+                        meshes_indices[i+1] = self.get_null_mesh_or_grow() as u32;
+                    }
+                    let mesh_idx = meshes_indices[i+1] as usize;
+                    self.get_mut_mesh_at_index(mesh_idx).copy_from_slice(&content_mesh[i*Self::MESH_LEN..(i+1)*Self::MESH_LEN]);
+                }
+            } else {
+                for i in 1..=2 {
+                    if meshes_indices[i] != 0 {
+                        let mesh_idx = meshes_indices[i] as usize;
+                        self.get_mut_mesh_at_index(mesh_idx).copy_from_slice(&Self::null_mesh());
 
-            self.content_meshes_indices_map.insert((tile_pos.x, tile_pos.y), (content_mesh_index, content.clone()));
+                        meshes_indices[i] = 0;
+                    }
+                }
+            }
+        }
+
+        if should_insert_tile_mesh || should_insert_content_mesh {
+            self.tiles_positions_map.insert(tile_pos, (tile.clone(), meshes_indices));
         }
     }
-
-    fn fill_factor_is_low(&self) -> bool {
-        let content_meshes_total_space = self.content_meshes_slice().len()/Self::VERTICES_IN_CONTENT_MESH;
-
-        content_meshes_total_space > Self::min_number_of_empty_content_meshes(self.world_size)
-        && self.empty_content_meshes.len() > content_meshes_total_space / 2
-    }
-    fn remove_content_mesh(&mut self, tile_pos: UVec2) {
-        let prev_content = self.content_meshes_indices_map.remove(&(tile_pos.x, tile_pos.y));
-        if let Some((index, _prev_content)) = prev_content {
+    fn remove_mesh(&mut self, tile_pos: UVec2) {
+        let prev_content = self.tiles_positions_map.remove(&tile_pos);
+        if let Some((_prev_tile, indices)) = prev_content {
+            let indices = indices.map(|n| n as usize);
             //hashmap reports content where there is none
-            self.empty_content_meshes.push(index);
-            self.vertices[index..index+Self::VERTICES_IN_CONTENT_MESH].copy_from_slice(&Self::null_content_mesh());
+            self.empty_meshes.extend_from_slice(&indices);
+            for index in indices {
+                if index != 0 {
+                    self.get_mut_mesh_at_index(index).copy_from_slice(&Self::null_mesh());
+                }
+            }
+
             if self.fill_factor_is_low() {
-                let mut new_content_meshes_indices_map = HashMap::new();
-                let mut new_content_meshes = Vec::new();
-                let mut new_empty_content_meshes = Vec::new();
-                let content_meshes_start = self.content_meshes().start;
+                let mut new_tiles_positions_map = HashMap::new();
+                let mut new_verts = Vec::new();
+                let mut new_empty_meshes = Vec::new();
 
-                for (coords, (old_index, content)) in self.content_meshes_indices_map.drain() {
-                    let new_index = new_content_meshes.len();
-                    new_content_meshes[new_index..new_index+Self::VERTICES_IN_CONTENT_MESH].copy_from_slice(&self.vertices[old_index..old_index+Self::VERTICES_IN_CONTENT_MESH]);
-                    new_content_meshes_indices_map.insert(coords, (new_index + content_meshes_start, content));
+                new_verts.extend_from_slice(self.get_mesh_at_index(0));
+
+                for (tile_pos, (tile, old_indices)) in self.tiles_positions_map.iter() {
+                    let mut new_indices = [0;3];
+                    for (i, old_index) in old_indices.iter().cloned().enumerate() {
+                        if old_index != 0 {
+                            new_indices[i] = new_verts.len() as u32;
+                            new_verts.extend_from_slice(self.get_mesh_at_index(old_index as usize));
+                        }
+                    }
+                    new_tiles_positions_map.insert(tile_pos.clone(), (tile.clone(), new_indices));
                 }
 
-                let new_content_meshes_size = self.content_meshes_slice().len() * 2 / 3;
+                let number_of_meshes = self.verts.len() / Self::MESH_LEN;
+                let new_number_of_meshes = number_of_meshes * 2 / 3;
 
-                for i in new_content_meshes.len()..new_content_meshes_size {
-                    new_empty_content_meshes.push(i + content_meshes_start);
+                for i in number_of_meshes..new_number_of_meshes {
+                    new_empty_meshes.push(i*Self::MESH_LEN);
                 }
 
-                self.content_meshes_indices_map = new_content_meshes_indices_map;
-                self.content_meshes_slice_mut().copy_from_slice(&new_content_meshes);
-                self.empty_content_meshes = new_empty_content_meshes;
-
+                self.tiles_positions_map = new_tiles_positions_map;
+                self.empty_meshes = new_empty_meshes;
+                self.verts = new_verts;
             }
         }
         //do nothing if the hashmap agrees there is no content
     }
+    fn fill_factor_is_low(&self) -> bool {
+        let number_of_meshes = self.verts.len()/Self::MESH_LEN;
+
+        number_of_meshes > self.min_number_of_meshes
+        && self.empty_meshes.len() > number_of_meshes / 2
+    }
     fn update_vbo_slice(&mut self, range: Range<usize>) {
         let vbo_slice = self.vbo.slice(range.clone()).unwrap();
-        vbo_slice.write(&self.vertices[range]);
+        vbo_slice.write(&self.verts[range]);
     }
     fn update_vbo(&mut self, tiles_to_refresh: &HashSet<UVec2>, display: &Display) {
-        if self.vbo.len() == self.vertices.len() {
-            self.update_vbo_slice( 0..Self::VERTICES_IN_ROBOT_MESH);
+        if self.vbo.len() == self.verts.len() {
+            //update robot mesh
+            let mut update_set = range_set![0..=(Self::MESH_LEN-1);1];
 
             for tile_pos in tiles_to_refresh {
-                let tile_mesh_position = Self::VERTICES_IN_ROBOT_MESH + (tile_pos.y as usize * self.world_size + tile_pos.x as usize) * Self::VERTICES_PER_TILE;
-                self.update_vbo_slice(tile_mesh_position..tile_mesh_position+Self::VERTICES_PER_TILE);
-            }
+                //tiles to refresh are not necessarily known, since any tile close to a tile that has changed is pushed inside and that includes undiscovered tiles
+                if let Some((_tile, indices)) = self.tiles_positions_map.get(tile_pos).cloned() {
 
-            for tile_pos in tiles_to_refresh {
-                if let Some((content_mesh_pos, _)) = self.content_meshes_indices_map.get(&(tile_pos.x, tile_pos.y)) {
-                    let content_mesh_pos= *content_mesh_pos;
-                    self.update_vbo_slice(content_mesh_pos..content_mesh_pos+Self::VERTICES_IN_CONTENT_MESH);
+                    //update tile
+                    let tile_mesh_idx = indices[0] as usize;
+                    update_set.insert_range(tile_mesh_idx..=(tile_mesh_idx + Self::MESH_LEN - 1));
+
+                    //update content
+                    for i in 1..=2 {
+                        let content_mesh_idx = indices[i] as usize;
+                        update_set.insert_range(content_mesh_idx..=(content_mesh_idx + Self::MESH_LEN - 1));
+                    }
+
+
                 }
             }
+            for range in update_set.as_ref() {
+                let range = *range.start()..(*range.end() + 1);
+                self.update_vbo_slice(range);
+            }
         } else {
-            self.vbo = VertexBuffer::dynamic(display, &self.vertices).unwrap();
+            self.vbo = VertexBuffer::dynamic(display, &self.verts).unwrap();
         }
     }
-
-    pub fn new(display: &Display, world_size: usize) -> Self {
-
-        let number_of_empty_content_meshes_at_start = Self::min_number_of_empty_content_meshes(world_size);
-
-        let start_of_content_meshes = Self::VERTICES_IN_ROBOT_MESH + world_size * world_size * Self::VERTICES_PER_TILE;
-        let number_of_vertices = start_of_content_meshes + number_of_empty_content_meshes_at_start * Self::VERTICES_IN_CONTENT_MESH;
-        let vertices = vec![Vertex::null(); number_of_vertices];
-
-        let vbo = VertexBuffer::<Vertex>::empty_dynamic(display, number_of_vertices).unwrap();
-
-        let content_meshes_indices_map = HashMap::new();
-        let empty_content_meshes = Vec::from_iter(
-            (0..number_of_empty_content_meshes_at_start)
-            .map(|i| start_of_content_meshes + i * Self::VERTICES_IN_CONTENT_MESH)
-        );
-
-        Self { vertices, vbo, world_size, content_meshes_indices_map, empty_content_meshes }
-    }
-    pub fn update(&mut self, world: &mut PartialWorld, tiles_to_refresh: &HashSet<UVec2>, display: &Display) {
-        assert_eq!(self.world_size, world.world.len());
-        let color_displace_amount = 0.1;
-        let position_displace_amount = 0.1;
+    pub fn update(&mut self, world: &mut PartialWorld, display: &Display) {
 
         //update robot mesh
         {
@@ -237,66 +254,66 @@ impl WorldMesh {
                 })
             }).into_iter().flatten().collect::<Vec<_>>();
 
-            self.vertices[0..Self::VERTICES_IN_ROBOT_MESH].copy_from_slice(&robot_vertices);
+            assert_eq!(robot_vertices.len(), Self::MESH_LEN);
+            self.get_mut_mesh_at_index(0).copy_from_slice(&robot_vertices);
         }
 
-        for tile_pos in tiles_to_refresh.iter().cloned() {
-            if let Some(tile) = &world.world[tile_pos.x as usize][tile_pos.y as usize] {
-                //tile vertices
-                {
-                    let mut tile_vertices = vec![];
-                    tile_vertices.reserve(24);
-                    let mut positions = vec![];
-                    positions.reserve(24);
-                    let color = tile_to_color(tile);
-                    let mut rng = SmallRng::seed_from_u64(tile_pos.x as u64 + ((tile_pos.y as u64) << 32));
-                    let bool_distr = rand::distributions::Uniform::<i8>::new(0, 2);
+        //tile and content meshes
+        for tile_pos in world.tiles_to_refresh.iter().cloned() {
+            let tile = world.world[tile_pos.x as usize][tile_pos.y as usize].clone();
+            match tile {
+                None => self.remove_mesh(tile_pos),
+                Some(tile) => self.insert_mesh(tile_pos, tile, &world.world),
+            };
+        }
 
-                    for n in 0..9 {
-                        positions.push([tile_pos.x * 2 + n % 3, tile_pos.y * 2 + n / 3]);
+        self.update_vbo(&world.tiles_to_refresh, display);
+    }
+    fn get_tile_mesh(t: &Tile, tile_pos: UVec2, world: &Vec<Vec<Option<Tile>>>) -> [Vertex; Self::MESH_LEN] {
+        let color_displace_amount = 0.1;
+        let position_displace_amount = 0.1;
+
+        let mut tile_vertices = [Vertex::null(); 24];
+        let mut tile_vertices_current_size = 0;
+        let mut positions = vec![];
+        positions.reserve(24);
+        let color = tile_to_color(t);
+        let mut rng = SmallRng::seed_from_u64(tile_pos.x as u64 + ((tile_pos.y as u64) << 32));
+        let bool_distr = rand::distributions::Uniform::<i8>::new(0, 2);
+
+        for n in 0..9 {
+            positions.push([tile_pos.x * 2 + n % 3, tile_pos.y * 2 + n / 3]);
+        }
+
+        for quad in 0..4 {
+            let quad_offset = [0, 1, 3, 4][quad];
+            let quad_positions_index =
+                //randomize how the quads are split into tris
+                if rng.sample(bool_distr) == 0 { [0usize, 1, 3, 4] } else { [1, 4, 0, 3] }
+                    // then offset the indices in the mesh to get the correct positions for the current quad
+                    .map(|n| n + quad_offset);
+            let quad_positions = quad_positions_index.map(|i| positions[i]);
+
+            for tri in [&quad_positions[0..3], &[quad_positions[2], quad_positions[1], quad_positions[3]]] {
+                let color = rand_displace_vec(color, color_displace_amount, &mut rng).as_ref().clone();
+                for [x, z] in tri {
+                    let mut position = [*x as f32 / 2.0, get_elevation((*x as usize, *z as usize), &world).unwrap(), *z as f32 / 2.0];
+                    if *x % 2 != 1 || *z % 2 != 1 {
+                        let mut vtx_pos_rng = SmallRng::seed_from_u64(*x as u64 + ((*z as u64) << 32));
+                        position = rand_displace_vec(Vec3::from(position), position_displace_amount, &mut vtx_pos_rng).as_ref().clone();
                     }
-
-                    for quad in 0..4 {
-                        let quad_offset = [0, 1, 3, 4][quad];
-                        let quad_positions_index =
-                            //randomize how the quads are split into tris
-                            if rng.sample(bool_distr) == 0 { [0usize, 1, 3, 4] } else { [1, 4, 0, 3] }
-                                // then offset the indices in the mesh to get the correct positions for the current quad
-                                .map(|n| n + quad_offset);
-                        let quad_positions = quad_positions_index.map(|i| positions[i]);
-
-                        for tri in [&quad_positions[0..3], &[quad_positions[2], quad_positions[1], quad_positions[3]]] {
-                            let color = rand_displace_vec(color, color_displace_amount, &mut rng).as_ref().clone();
-                            for [x, z] in tri {
-                                let mut position = [*x as f32 / 2.0, get_elevation((*x as usize, *z as usize), &world.world).unwrap(), *z as f32 / 2.0];
-                                if *x % 2 != 1 || *z % 2 != 1 {
-                                    let mut vtx_pos_rng = SmallRng::seed_from_u64(*x as u64 + ((*z as u64) << 32));
-                                    position = rand_displace_vec(Vec3::from(position), position_displace_amount, &mut vtx_pos_rng).as_ref().clone();
-                                }
-                                tile_vertices.push(Vertex { position, color });
-                            }
-                        }
-                    }
-
-                    let vertex_position = Self::VERTICES_IN_ROBOT_MESH + (tile_pos.y as usize * self.world_size + tile_pos.x as usize) * Self::VERTICES_PER_TILE;
-                    self.vertices[vertex_position..vertex_position + Self::VERTICES_PER_TILE].copy_from_slice(&tile_vertices);
+                    tile_vertices[tile_vertices_current_size] = Vertex { position, color };
+                    tile_vertices_current_size += 1;
                 }
-                // content vertices
-                {
-                    if tile.content == Content::None {
-                        self.remove_content_mesh(tile_pos);
-                    } else {
-                        self.insert_content_mesh(tile_pos, tile.elevation, tile.content.clone());
-                    }
-                }
-
             }
         }
 
-        self.update_vbo(tiles_to_refresh, display);
+        assert_eq!(tile_vertices_current_size, 24);
+
+        tile_vertices
     }
 
-    fn content_to_mesh(c: &Content, tile_pos: UVec2, elevation: usize) -> Option<[Vertex; Self::VERTICES_IN_CONTENT_MESH]> {
+    fn get_content_mesh(c: &Content, tile_pos: UVec2, elevation: usize) -> Option<[Vertex; Self::MESH_LEN*2]> {
         /*
         to get the vertices from blender use the following code; this will create a file ~/file.txt with our meshes inside.
 
@@ -345,7 +362,7 @@ with open(save_to_file, 'w') as file:
 
             Content::Water(_) | Content::None => { None }
         }.map(|(pos, colors, indices)| {
-            let mut vertices = [Vertex::null(); Self::VERTICES_IN_CONTENT_MESH];
+            let mut vertices = [Vertex::null(); Self::MESH_LEN*2];
 
             let mut rng = SmallRng::seed_from_u64(tile_pos.x as u64 + ((tile_pos.y as u64) << 32));
 
@@ -370,7 +387,6 @@ with open(save_to_file, 'w') as file:
         content_mesh
     }
 }
-
 
 fn tile_to_color(t: &Tile) -> Vec3 {
     Vec3::from_row_slice(&match t.tile_type {
