@@ -1,6 +1,6 @@
 use std::cmp::{max, min};
 use std::collections::HashSet;
-use std::sync::mpsc::{Receiver, Sender, SendError};
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use nalgebra_glm::vec2;
 use robotics_lib::world::tile::Tile;

@@ -59,7 +59,7 @@ impl GuiRunner {
         Ok(Self { runner, worker_thread, gui_thread, gui_to_game_rx })
     }
 
-    pub fn run(mut self) -> Result<(), LibError> {
+    pub fn run(self) -> Result<(), LibError> {
         let worker_thread_handle = self.worker_thread.start();
         let gui_thread_handle = self.gui_thread.start();
 
