@@ -4,11 +4,11 @@ mod keyboard_event_handler;
 mod frame_delta_timer;
 
 use std::f32::consts::PI;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::thread;
 use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
-use imgui::{Condition, SliderFlags, TreeNodeFlags};
+use imgui::{Condition, SliderFlags, StyleColor, TreeNodeFlags};
 use imgui_winit_support::HiDpiMode;
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
@@ -22,10 +22,10 @@ use super::{PartialWorld, RunMode};
 
 pub struct GUIThread {
     worker_to_gui_rx: Receiver<PartialWorld>,
-    gui_to_game_tx: Sender<RunMode>,
+    gui_to_game_tx: SyncSender<RunMode>,
 }
 impl GUIThread {
-    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: Sender<RunMode>) -> Self {
+    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: SyncSender<RunMode>) -> Self {
         Self { worker_to_gui_rx, gui_to_game_tx }
     }
     pub fn start(self) -> thread::JoinHandle<()> {
@@ -65,7 +65,7 @@ pub fn proj_matrix(frame: &Frame, fov: f32) -> Mat4 {
 pub struct GUI {
     // world: Arc<Mutex<SharedState>>,
     rx_from_game: Receiver<PartialWorld>,
-    tx_to_game: Sender<RunMode>,
+    tx_to_game: SyncSender<RunMode>,
     world_copy: PartialWorld,
 
     event_loop: EventLoop<()>,
@@ -81,7 +81,7 @@ pub struct GUI {
 }
 
 impl GUI {
-    pub fn new(window_title: &str, rx_from_game: Receiver<PartialWorld>, tx_to_game: Sender<RunMode>) -> Self {
+    pub fn new(window_title: &str, rx_from_game: Receiver<PartialWorld>, tx_to_game: SyncSender<RunMode>) -> Self {
         let event_loop =
             winit::event_loop::EventLoopBuilder::new()
             .with_any_thread(true)
@@ -125,7 +125,7 @@ impl GUI {
 
         let mut frame_delta_timer = FrameDeltaTimer::new();
 
-        let mut last_ticks_per_second_cap = 60.0_f32;
+        let mut last_ticks_per_second_cap = 5.0_f32;
         let mut last_was_uncapped = false;
         let mut follow_robot = false;
         let mut find_robot = false;
@@ -139,7 +139,7 @@ impl GUI {
                 winit::event::Event::WindowEvent { event, .. } => match event {
                     winit::event::WindowEvent::CloseRequested => {
                         run_mode = RunMode::Terminate;
-                        self.tx_to_game.send(run_mode).unwrap();
+                        let _ = self.tx_to_game.try_send(run_mode);
 
                         _control_flow.set_exit();
                     },
@@ -154,10 +154,10 @@ impl GUI {
                                     RunMode::Continuous(cap)
                                 }
                             };
-                            self.tx_to_game.send(run_mode).unwrap();
+                            let _ = self.tx_to_game.try_send(run_mode);
                         } else if kbd_input.single_tick {
                             run_mode = RunMode::SingleTick;
-                            self.tx_to_game.send(run_mode).unwrap();
+                            let _ = self.tx_to_game.try_send(run_mode);
                         }
                         if kbd_input.toggle_follow_robot {
                             follow_robot = !follow_robot;
@@ -166,11 +166,11 @@ impl GUI {
                     }
                     _ => {}
                 },
-                //MainEventsCleared can be used for rendering since we don't lock the framerate
+                // MainEventsCleared can be used for rendering since we don't lock the framerate
                 winit::event::Event::MainEventsCleared => {
                     let delta = frame_delta_timer.get_delta_and_reset();
 
-                    //update world_copy
+                    // update world_copy
                     {
                         let new_world = self.rx_from_game.try_iter().last();
 
@@ -179,18 +179,21 @@ impl GUI {
                         }
                     }
 
-                    //move camera
+
+                    // move/rotate camera
+                    kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta, UP);
+
+                    // make the camera go to the robot if needed
                     if find_robot || follow_robot {
                         let w = &self.world_copy;
                         let elevation = w.world[w.robot_position.x as usize][w.robot_position.y as usize].as_ref().unwrap().elevation;
                         cam_pos = vec3(self.world_copy.robot_position.x as f32, world_mesh::elevation_to_mesh_space_y(elevation as f32), self.world_copy.robot_position.y as f32) - cam_dir * 30.0;
 
                         find_robot = false;
-                    } else {
-                        kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta, UP);
                     }
 
-                    //rendering
+
+                    // rendering
                     {
                         let mut target = self.display.draw();
 
@@ -199,7 +202,7 @@ impl GUI {
                             proj_matrix(&target, PI / 3.0) * view_matrix(cam_pos, cam_dir, UP) * model
                         };
 
-                        let params = glium::DrawParameters {
+                        let draw_params = glium::DrawParameters {
                             depth: glium::Depth {
                                 test: glium::draw_parameters::DepthTest::IfLess,
                                 write: true,
@@ -219,7 +222,8 @@ impl GUI {
                             self.world_mesh.update(&mut self.world_copy, &self.display);
                             self.world_copy.tiles_to_refresh.clear();
 
-                            target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList), &self.shader_program,&uniform! { mvp:  *mvp.as_ref() }, &params).unwrap();
+                            target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList),
+                                        &self.shader_program,&uniform! { mvp:  *mvp.as_ref() }, &draw_params).unwrap();
                         }
 
                         //render imgui
@@ -234,42 +238,55 @@ impl GUI {
                                     if ui.collapsing_header("Simulation settings", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
 
-                                        match run_mode {
-                                            RunMode::Continuous(_) => {
-                                                if ui.button("Stop") {
-                                                    run_mode = RunMode::Paused;
-                                                    self.tx_to_game.send(run_mode).unwrap();
-                                                } else {
-                                                    let mut changed = false;
-                                                    changed = changed || ui.checkbox("Uncapped?", &mut last_was_uncapped);
+                                        let continuous = match run_mode {
+                                            RunMode::Continuous(_) => true,
+                                            _ => false,
+                                        };
 
-                                                    ui.disabled(last_was_uncapped, || {
-                                                        changed = changed || ui.slider_config("speed", 0.1, 1000.0)
-                                                            .flags(SliderFlags::LOGARITHMIC)
-                                                            .build(&mut last_ticks_per_second_cap);
-                                                    });
+                                        if continuous {
+                                            if ui.button("Stop") {
+                                                run_mode = RunMode::Paused;
+                                                let _ = self.tx_to_game.try_send(run_mode);
+                                            }
+                                        } else {
+                                            if ui.button("Run") {
+                                                let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
+                                                run_mode = RunMode::Continuous(cap);
+                                                let _ = self.tx_to_game.try_send(run_mode);
+                                            }
+                                        }
 
-                                                    let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                                    if changed {
-                                                        run_mode = RunMode::Continuous(cap);
-                                                        self.tx_to_game.send(run_mode).unwrap();
-                                                    }
-                                                }
+                                        ui.same_line();
+
+                                        ui.disabled(continuous, || {
+                                            if ui.button("Run single tick") {
+                                                run_mode = RunMode::SingleTick;
+                                                let _ = self.tx_to_game.try_send(run_mode);
                                             }
-                                            RunMode::SingleTick | RunMode::Paused => {
-                                                if ui.button("Run") {
-                                                    let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                                    run_mode = RunMode::Continuous(cap);
-                                                    self.tx_to_game.send(run_mode).unwrap();
-                                                } else {
-                                                    ui.same_line();
-                                                    if ui.button("Run single tick") {
-                                                        run_mode = RunMode::SingleTick;
-                                                        self.tx_to_game.send(run_mode).unwrap();
-                                                    }
-                                                }
-                                            }
-                                            RunMode::Terminate => { ui.text_wrapped("Simulation terminated."); }
+                                        });
+
+                                        let mut changed = false;
+
+                                        let greyed_out_text_if_not_continuous = if !continuous {
+                                            Some(ui.push_style_color(StyleColor::Text, [0.4, 0.4, 0.4, 1.0]))
+                                        } else { None };
+
+                                        changed = changed || ui.checkbox("Uncapped?", &mut last_was_uncapped);
+
+                                        let greyed_out_text_if_uncapped = if last_was_uncapped {
+                                            Some(ui.push_style_color(StyleColor::Text, [0.4, 0.4, 0.4, 1.0]))
+                                        } else { None };
+
+                                       changed = changed || ui.slider_config("speed", 0.1, 200.0)
+                                           .flags(SliderFlags::LOGARITHMIC)
+                                           .build(&mut last_ticks_per_second_cap);
+                                        if let Some(t) = greyed_out_text_if_uncapped { t.pop(); }
+                                        if let Some(t) = greyed_out_text_if_not_continuous { t.pop(); }
+
+                                        let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
+                                        if changed && continuous {
+                                            run_mode = RunMode::Continuous(cap);
+                                            let _ = self.tx_to_game.try_send(run_mode);
                                         }
 
                                         ui.unindent();
