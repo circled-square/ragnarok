@@ -34,6 +34,46 @@ pub(crate) struct PartialWorld {
     pub backpack: HashMap<Content, usize>,
     pub env_cond: EnvironmentalConditions,
 }
+
+/// Usage:
+/// ```
+///# use rand::random;
+///#
+///# use robotics_lib::runner::{Runnable};
+///# use robotics_lib::energy::Energy;
+///# use robotics_lib::event::events::Event;
+///# use robotics_lib::interface::Direction;
+///# use robotics_lib::runner::backpack::BackPack;
+///# use robotics_lib::world::coordinates::Coordinate;
+///# use robotics_lib::world::World;
+///#
+///# pub struct MyRobot {
+///#     pub robot: robotics_lib::runner::Robot,
+///# }
+///# impl MyRobot {
+///#     pub fn new() -> Self { Self { robot: robotics_lib::runner::Robot::new() } }
+///# }
+///# impl Runnable for MyRobot {
+///#     fn process_tick(&mut self, world: &mut World) {}
+///#     fn handle_event(&mut self, _event: Event) {}
+///#     fn get_energy(&self) -> &Energy { &self.robot.energy }
+///#     fn get_energy_mut(&mut self) -> &mut Energy { &mut self.robot.energy }
+///#     fn get_coordinate(&self) -> &Coordinate { &self.robot.coordinate }
+///#     fn get_coordinate_mut(&mut self) -> &mut Coordinate { &mut self.robot.coordinate }
+///#     fn get_backpack(&self) -> &BackPack { &self.robot.backpack }
+///#     fn get_backpack_mut(&mut self) -> &mut BackPack { &mut self.robot.backpack }
+///# }
+///fn main() {
+///     //MyRobot must implement Runnable
+///    let robot = MyRobot::new();
+///    let mut world_generator = rip_worldgenerator::MyWorldGen::new();
+///
+///    // GuiRunner is constructed similarly to Runner
+///    let gui_runner = ragnarok::GuiRunner::new(Box::new(robot), &mut world_generator).unwrap();
+///    // GuiRunner::run runs the game
+///    gui_runner.run().unwrap();
+///}
+/// ```
 pub struct GuiRunner {
     //necessary for running game loop:
     runner: Runner,
@@ -44,6 +84,7 @@ pub struct GuiRunner {
     gui_thread: GUIThread,
 }
 impl GuiRunner {
+    /// Constructs a GuiRunner, given a Runnable and a Generator (similarly to `Runner::new`).
     pub fn new(robot: Box<dyn Runnable>, generator: &mut impl Generator) -> Result<GuiRunner, LibError> {
         let (game_to_worker_tx, game_to_worker_rx) = sync::mpsc::sync_channel::<PartialWorld>(1);
         let (worker_to_gui_tx, worker_to_gui_rx) = sync::mpsc::channel::<PartialWorld>();
@@ -59,6 +100,8 @@ impl GuiRunner {
         Ok(Self { runner, worker_thread, gui_thread, gui_to_game_rx })
     }
 
+    /// Starts the game loop and the GUI, which will run on different threads. Consumes GuiRunner
+    /// and only returns when the user closes the window.
     pub fn run(self) -> Result<(), LibError> {
         let worker_thread_handle = self.worker_thread.start();
         let gui_thread_handle = self.gui_thread.start();

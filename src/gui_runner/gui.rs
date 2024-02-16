@@ -78,7 +78,6 @@ pub struct GUI {
 
     kbd_event_handler: KeyboardEventHandler,
 }
-
 impl GUI {
     pub fn new(window_title: &str, rx_from_worker: Receiver<PartialWorld>, tx_to_game: Sender<RunMode>) -> Self {
         let event_loop =

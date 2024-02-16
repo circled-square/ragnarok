@@ -429,7 +429,7 @@ with open(save_to_file, 'w') as file:
         }
         let world_size = world_size as f32;
         let color_gradient_for_weather = match env_cond.get_weather_condition() {
-            WeatherType::Sunny =>           [vec3(0.7, 0.7, 1.0), vec3(0.5, 0.4, 0.4), vec3(0.1, 0.1, 0.1)],
+            WeatherType::Sunny =>           [vec3(0.7, 0.6, 1.0), vec3(0.5, 0.4, 0.4), vec3(0.1, 0.1, 0.1)],
             WeatherType::Rainy =>           [vec3(0.6, 0.6, 0.8), vec3(0.5, 0.5, 0.7), vec3(0.0, 0.0, 0.0)],
             WeatherType::Foggy =>           [vec3(0.6, 0.6, 0.6), vec3(0.5, 0.5, 0.5), vec3(0.0, 0.0, 0.0)],
             WeatherType::TropicalMonsoon => [vec3(0.1, 0.1, 0.1), vec3(0.2, 0.2, 0.2), vec3(0.0, 0.0, 0.0)],
