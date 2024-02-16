@@ -1,5 +1,6 @@
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::PI;
 use std::ops::{Range};
 use glium::{Display, VertexBuffer};
 use nalgebra_glm::{rotate_vec3, UVec2, Vec3, vec3};
@@ -8,6 +9,7 @@ use rand::{Rng, SeedableRng};
 use robotics_lib::world::tile::{Content, Tile, TileType};
 use num_traits::Float;
 use range_set::range_set;
+use robotics_lib::world::environmental_conditions::{DayTime, EnvironmentalConditions, WeatherType};
 use crate::gui_runner::PartialWorld;
 
 #[derive(Clone, Copy, Debug)]
@@ -36,11 +38,14 @@ pub(crate) struct WorldMesh {
 impl WorldMesh {
     const MESH_LEN: usize = 24;
 
+    const ROBOT_MESH_INDEX: usize = 0;
+    const SKYBOX_MESH_INDEX: usize = Self::MESH_LEN;
+
     pub fn new(min_number_of_meshes: usize, display: &Display) -> Self {
         Self {
             vbo: VertexBuffer::empty_dynamic(display, min_number_of_meshes*Self::MESH_LEN).unwrap(),
             verts: vec![Vertex::null(); min_number_of_meshes * Self::MESH_LEN],
-            empty_meshes: Vec::from_iter((1..min_number_of_meshes).map(|i| i * Self::MESH_LEN)),
+            empty_meshes: Vec::from_iter((2..min_number_of_meshes).map(|i| i * Self::MESH_LEN)),
             tiles_positions_map: HashMap::new(),
             min_number_of_meshes
         }
@@ -87,14 +92,10 @@ impl WorldMesh {
             None => (None, [0,0,0]),
         };
 
-        let (should_insert_tile_mesh, should_insert_content_mesh) =
-            if let Some(prev_tile) = prev_tile {
-                (true, prev_tile.content.index() != tile.content.index())
-            } else {
-                (true, true)
-            };
+        let should_insert_content_mesh = prev_tile.map(|prev| prev.content.index() != tile.content.index()).unwrap_or(true);
 
-        if should_insert_tile_mesh {
+        //insert tile mesh
+        {
             if meshes_indices[0] == 0 {
                 meshes_indices[0] = self.get_null_mesh_or_grow() as u32;
             }
@@ -102,6 +103,7 @@ impl WorldMesh {
             let tile_mesh = Self::get_tile_mesh(&tile, tile_pos, world);
             self.get_mut_mesh_at_index(tile_mesh_index).copy_from_slice(&tile_mesh);
         }
+
         if should_insert_content_mesh {
             let content_mesh = Self::get_content_mesh(&tile.content, tile_pos, tile.elevation);
             if let Some(content_mesh) = content_mesh {
@@ -117,17 +119,55 @@ impl WorldMesh {
                     if meshes_indices[i] != 0 {
                         let mesh_idx = meshes_indices[i] as usize;
                         self.get_mut_mesh_at_index(mesh_idx).copy_from_slice(&Self::null_mesh());
+                        self.empty_meshes.push(mesh_idx);
 
                         meshes_indices[i] = 0;
+
+                        if self.fill_factor_is_low() {
+                            self.shrink();
+                        }
                     }
                 }
             }
         }
 
-        if should_insert_tile_mesh || should_insert_content_mesh {
-            self.tiles_positions_map.insert(tile_pos, (tile.clone(), meshes_indices));
-        }
+        self.tiles_positions_map.insert(tile_pos, (tile.clone(), meshes_indices));
     }
+
+    //resizes the memory to 2/3 of what it previously was. assumes all the vertices can fit in there
+    fn shrink(&mut self) {
+        assert!(self.fill_factor_is_low());
+        let mut new_tiles_positions_map = HashMap::new();
+        let mut new_verts = Vec::new();
+        let mut new_empty_meshes = Vec::new();
+
+        new_verts.extend_from_slice(self.get_mesh_at_index(Self::ROBOT_MESH_INDEX));
+        new_verts.extend_from_slice(self.get_mesh_at_index(Self::SKYBOX_MESH_INDEX));
+
+        for (tile_pos, (tile, old_indices)) in self.tiles_positions_map.iter() {
+            let mut new_indices = [0;3];
+            for (i, old_index) in old_indices.iter().cloned().enumerate() {
+                if old_index != 0 {
+                    new_indices[i] = new_verts.len() as u32;
+                    new_verts.extend_from_slice(self.get_mesh_at_index(old_index as usize));
+                }
+            }
+            new_tiles_positions_map.insert(tile_pos.clone(), (tile.clone(), new_indices));
+        }
+
+        let number_of_meshes = self.verts.len() / Self::MESH_LEN;
+        let new_number_of_meshes = number_of_meshes * 2 / 3;
+
+        for i in number_of_meshes..new_number_of_meshes {
+            new_empty_meshes.push(i*Self::MESH_LEN);
+        }
+
+        self.tiles_positions_map = new_tiles_positions_map;
+        self.empty_meshes = new_empty_meshes;
+        self.verts = new_verts;
+    }
+
+    #[allow(dead_code)]
     fn remove_mesh(&mut self, tile_pos: UVec2) {
         let prev_content = self.tiles_positions_map.remove(&tile_pos);
         if let Some((_prev_tile, indices)) = prev_content {
@@ -141,33 +181,7 @@ impl WorldMesh {
             }
 
             if self.fill_factor_is_low() {
-                let mut new_tiles_positions_map = HashMap::new();
-                let mut new_verts = Vec::new();
-                let mut new_empty_meshes = Vec::new();
-
-                new_verts.extend_from_slice(self.get_mesh_at_index(0));
-
-                for (tile_pos, (tile, old_indices)) in self.tiles_positions_map.iter() {
-                    let mut new_indices = [0;3];
-                    for (i, old_index) in old_indices.iter().cloned().enumerate() {
-                        if old_index != 0 {
-                            new_indices[i] = new_verts.len() as u32;
-                            new_verts.extend_from_slice(self.get_mesh_at_index(old_index as usize));
-                        }
-                    }
-                    new_tiles_positions_map.insert(tile_pos.clone(), (tile.clone(), new_indices));
-                }
-
-                let number_of_meshes = self.verts.len() / Self::MESH_LEN;
-                let new_number_of_meshes = number_of_meshes * 2 / 3;
-
-                for i in number_of_meshes..new_number_of_meshes {
-                    new_empty_meshes.push(i*Self::MESH_LEN);
-                }
-
-                self.tiles_positions_map = new_tiles_positions_map;
-                self.empty_meshes = new_empty_meshes;
-                self.verts = new_verts;
+                self.shrink();
             }
         }
         //do nothing if the hashmap agrees there is no content
@@ -184,8 +198,8 @@ impl WorldMesh {
     }
     fn update_vbo(&mut self, tiles_to_refresh: &HashSet<UVec2>, display: &Display) {
         if self.vbo.len() == self.verts.len() {
-            //update robot mesh
-            let mut update_set = range_set![0..=(Self::MESH_LEN-1);1];
+            //update robot mesh and skybox
+            let mut update_set = range_set![0..=(Self::MESH_LEN * 2 - 1);1];
 
             for tile_pos in tiles_to_refresh {
                 //tiles to refresh are not necessarily known, since any tile close to a tile that has changed is pushed inside and that includes undiscovered tiles
@@ -198,10 +212,10 @@ impl WorldMesh {
                     //update content
                     for i in 1..=2 {
                         let content_mesh_idx = indices[i] as usize;
-                        update_set.insert_range(content_mesh_idx..=(content_mesh_idx + Self::MESH_LEN - 1));
+                        if content_mesh_idx != 0 {
+                            update_set.insert_range(content_mesh_idx..=(content_mesh_idx + Self::MESH_LEN - 1));
+                        }
                     }
-
-
                 }
             }
             for range in update_set.as_ref() {
@@ -212,12 +226,10 @@ impl WorldMesh {
             self.vbo = VertexBuffer::dynamic(display, &self.verts).unwrap();
         }
     }
-    pub fn update(&mut self, world: &mut PartialWorld, display: &Display) {
+    pub fn update(&mut self, world: &mut PartialWorld, display: &Display, enable_skybox: bool) {
 
         //update robot mesh
         {
-            let robot_position = (world.robot_position.x as usize * 2, world.robot_position.y as usize * 2);
-
             let robot_vertices_repetitionless = [
                 [ 0.0, 0.0,  0.0],
                 [ 0.5, 1.0,  0.0],
@@ -238,6 +250,7 @@ impl WorldMesh {
             ].map(|tri| tri.map(|i| robot_vertices_repetitionless[i]));
 
             let mut robot_color_rng = SmallRng::seed_from_u64(1);
+            let robot_position = (world.robot_position.x as usize * 2, world.robot_position.y as usize * 2);
 
             let robot_vertices = robot_tris.map(|tri| {
                 let color = rand_displace_vec(vec3(0.2, 0.2, 0.2), 0.07, &mut robot_color_rng);
@@ -257,11 +270,14 @@ impl WorldMesh {
             self.get_mut_mesh_at_index(0).copy_from_slice(&robot_vertices);
         }
 
+        //update skybox mesh
+        self.get_mut_mesh_at_index(Self::SKYBOX_MESH_INDEX).copy_from_slice(&Self::get_skybox_mesh(&world.env_cond, world.world.len(), enable_skybox));
+
         //tile and content meshes
         for tile_pos in world.tiles_to_refresh.iter().cloned() {
             let tile = world.world[tile_pos.x as usize][tile_pos.y as usize].clone();
             match tile {
-                None => self.remove_mesh(tile_pos),
+                None => {},
                 Some(tile) => self.insert_mesh(tile_pos, tile, &world.world),
             };
         }
@@ -275,7 +291,7 @@ impl WorldMesh {
         let mut tile_vertices = [Vertex::null(); 24];
         let mut tile_vertices_current_size = 0;
         let mut positions = vec![];
-        positions.reserve(24);
+        positions.reserve(9);
         let color = tile_to_color(t);
         let mut rng = SmallRng::seed_from_u64(tile_pos.x as u64 + ((tile_pos.y as u64) << 32));
         let bool_distr = rand::distributions::Uniform::<i8>::new(0, 2);
@@ -289,8 +305,8 @@ impl WorldMesh {
             let quad_positions_index =
                 //randomize how the quads are split into tris
                 if rng.sample(bool_distr) == 0 { [0usize, 1, 3, 4] } else { [1, 4, 0, 3] }
-                    // then offset the indices in the mesh to get the correct positions for the current quad
-                    .map(|n| n + quad_offset);
+                // then offset the indices in the mesh to get the correct positions for the current quad
+                .map(|n| n + quad_offset);
             let quad_positions = quad_positions_index.map(|i| positions[i]);
 
             for tri in [&quad_positions[0..3], &[quad_positions[2], quad_positions[1], quad_positions[3]]] {
@@ -345,7 +361,7 @@ with open(save_to_file, 'w') as file:
         let content_mesh = match c {
             Content::Rock(_) => Some(([(0.3378884494304657, -0.03197399526834488, -0.3138851821422577), (-0.017235703766345978, -0.031974006444215775, 0.5290529131889343), (-0.5396137237548828, 0.36432549357414246, -0.3138851821422577), (-0.3971201777458191, -0.4913543462753296, -0.3138851821422577)].as_slice(), [[0.45490196347236633, 0.45490196347236633, 0.45490196347236633], [0.45490196347236633, 0.45490196347236633, 0.45490196347236633], [0.45490196347236633, 0.45490196347236633, 0.45490196347236633], [0.45490196347236633, 0.45490196347236633, 0.45490196347236633]].as_slice(), [[0, 1, 3], [3, 1, 2], [2, 0, 3], [2, 1, 0]].as_slice())),
             Content::Tree(_) => Some(([(0.31201931834220886, -0.10876885801553726, -0.30857741832733154), (-0.038514453917741776, 0.05763806402683258, 3.1042990684509277), (-0.15606489777565002, 0.30776160955429077, -0.30857741832733154), (-0.27112331986427307, -0.20002827048301697, -0.308577299118042), (0.6444399356842041, -0.21872302889823914, 1.4419856071472168), (-0.038617659360170364, 0.10554106533527374, 4.437355995178223), (-0.26767897605895996, 0.5929371118545532, 1.4419856071472168), (-0.4918842017650604, -0.39655300974845886, 1.4419856071472168)].as_slice(), [[0.3176470696926117, 0.0, 0.0117647061124444], [0.3176470696926117, 0.0, 0.0117647061124444], [0.3176470696926117, 0.0, 0.0117647061124444], [0.3176470696926117, 0.0, 0.0117647061124444], [0.07058823853731155, 0.2980392277240753, 0.0470588244497776], [0.07058823853731155, 0.2980392277240753, 0.0470588244497776], [0.07058823853731155, 0.2980392277240753, 0.0470588244497776], [0.07058823853731155, 0.2980392277240753, 0.0470588244497776]].as_slice(), [[0, 1, 3], [3, 1, 2], [2, 0, 3], [2, 1, 0], [4, 5, 7], [7, 5, 6], [6, 4, 7], [6, 5, 4]].as_slice())),
-            Content::Fire => Some(([(-0.32559970021247864, -0.26937350630760193, 1.3679674863815308), (-0.16653382778167725, 0.22312411665916443, -0.6427121162414551), (-0.4869377613067627, -0.22495314478874207, -0.6427121162414551), (0.14466208219528198, -0.49166497588157654, -0.6427121162414551), (0.23177923262119293, -0.15800246596336365, 1.7272160053253174), (-0.08245214819908142, -0.025336697697639465, -0.6427121162414551), (-0.0577271431684494, 0.14848700165748596, 1.663439154624939), (-0.4386885166168213, 0.04237576574087143, -0.6427121162414551), (-0.07724404335021973, -0.2942878305912018, -0.6427121162414551), (-0.11699183285236359, 0.24955877661705017, 1.213547706604004), (-0.4523026943206787, 0.49277862906455994, -0.6427121162414551), (-0.2662193775177002, -0.05372508615255356, -0.6427121162414551), (0.21032358705997467, 0.19283175468444824, 1.3051484823226929), (0.2994685769081116, 0.4499984085559845, -0.6490964293479919), (-0.11341477930545807, 0.0641375407576561, -0.6490964293479919), (0.0003167837858200073, -0.1539779156446457, -0.6490964293479919), (0.011084333062171936, 0.08784336596727371, 1.7208317518234253), (-0.17736846208572388, 0.48467180132865906, -0.6490964293479919), (0.2779310345649719, -0.3365449607372284, -0.6490964293479919), (0.28869858384132385, -0.09472362697124481, 0.814437210559845), (0.10024579614400864, 0.30210480093955994, -0.6490964293479919), (0.4765293300151825, -0.041005998849868774, -0.6490964293479919), (0.3594602048397064, 0.17086261510849, 1.1580370664596558), (0.145167738199234, 0.41092434525489807, -0.6490964293479919), (0.43441757559776306, -0.2411147952079773, 0.644436776638031), (0.09909849613904953, -0.34424054622650146, -0.6490964293479919), (0.4849032759666443, -0.49133914709091187, -0.6490964293479919), (0.4580884277820587, -0.1400468647480011, -0.6490964293479919), (0.36667829751968384, -0.28513243794441223, 1.5278772115707397), (0.2810766398906708, -0.4793027937412262, -0.6490964293479919), (0.20032186806201935, -0.20994777977466583, -0.6490964293479919), (-0.005427256226539612, -0.3374654948711395, 1.2538800239562988), (-0.2022072672843933, -0.48339056968688965, -0.6490964293479919), (-0.24333104491233826, -0.33492985367774963, 0.7266889810562134), (-0.48546910285949707, -0.12873470783233643, -0.6490964293479919), (-0.07642987370491028, -0.48767566680908203, -0.6490964293479919)].as_slice(), [[0.8117647171020508, 0.0, 0.0], [0.8941176533699036, 0.0, 0.14901961386203766], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8627451062202454, 0.0, 0.09803921729326248], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.01568627543747425], [0.8117647171020508, 0.0, 0.0], [0.8196078538894653, 0.0, 0.007843137718737125], [0.8156862854957581, 0.0, 0.019607843831181526], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.003921568859368563], [0.8117647171020508, 0.0, 0.0], [0.8196078538894653, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.01568627543747425], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.0117647061124444], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.0], [0.8509804010391235, 0.0, 0.10196078568696976], [0.8235294222831726, 0.0, 0.0470588244497776], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8274509906768799, 0.0, 0.054901961237192154], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8196078538894653, 0.0, 0.03921568766236305], [0.8117647171020508, 0.0, 0.0]].as_slice(), [[2, 0, 1], [3, 4, 5], [8, 6, 7], [11, 9, 10], [14, 12, 13], [15, 16, 17], [18, 19, 20], [21, 22, 23], [26, 24, 25], [27, 28, 29], [30, 31, 32], [35, 33, 34]].as_slice())),
+            Content::Fire => Some(([(-0.32559970021247864, -0.26937350630760193, 1.3679674863815308), (-0.16653382778167725, 0.22312411665916443, -0.6427121162414551), (-0.4869377613067627, -0.22495314478874207, -0.6427121162414551), (0.14466208219528198, -0.49166497588157654, -0.6427121162414551), (0.23177923262119293, -0.15800246596336365, 1.7272160053253174), (-0.08245214819908142, -0.025336697697639465, -0.6427121162414551), (-0.0577271431684494, 0.14848700165748596, 1.663439154624939), (-0.4386885166168213, 0.04237576574087143, -0.6427121162414551), (-0.07724404335021973, -0.2942878305912018, -0.6427121162414551), (-0.11699183285236359, 0.24955877661705017, 1.213547706604004), (-0.4523026943206787, 0.49277862906455994, -0.6427121162414551), (-0.2662193775177002, -0.05372508615255356, -0.6427121162414551), (0.21032358705997467, 0.19283175468444824, 1.3051484823226929), (0.2994685769081116, 0.4499984085559845, -0.6490964293479919), (-0.11341477930545807, 0.0641375407576561, -0.6490964293479919), (0.0003167837858200073, -0.1539779156446457, -0.6490964293479919), (0.011084333062171936, 0.08784336596727371, 1.7208317518234253), (-0.17736846208572388, 0.48467180132865906, -0.6490964293479919), (0.2779310345649719, -0.3365449607372284, -0.6490964293479919), (0.28869858384132385, -0.09472362697124481, 0.814437210559845), (0.10024579614400864, 0.30210480093955994, -0.6490964293479919), (0.4765293300151825, -0.041005998849868774, -0.6490964293479919), (0.3594602048397064, 0.17086261510849, 1.1580370664596558), (0.145167738199234, 0.41092434525489807, -0.6490964293479919), (0.43441757559776306, -0.2411147952079773, 0.644436776638031), (0.09909849613904953, -0.34424054622650146, -0.6490964293479919), (0.4849032759666443, -0.49133914709091187, -0.6490964293479919), (0.4580884277820587, -0.1400468647480011, -0.6490964293479919), (0.36667829751968384, -0.28513243794441223, 1.5278772115707397), (0.2810766398906708, -0.4793027937412262, -0.6490964293479919), (0.20032186806201935, -0.20994777977466583, -0.6490964293479919), (-0.005427256226539612, -0.3374654948711395, 1.2538800239562988), (-0.2022072672843933, -0.48339056968688965, -0.6490964293479919), (-0.24333104491233826, -0.33492985367774963, 0.7266889810562134), (-0.48546910285949707, -0.12873470783233643, -0.6490964293479919), (-0.07642987370491028, -0.48767566680908203, -0.6490964293479919)].as_slice(), [[0.8117647171020508, 0.20392157137393951, 0.0], [0.8117647171020508, 0.2078431397676468, 0.0], [0.8117647171020508, 0.20392157137393951, 0.0], [0.8117647171020508, 0.16862745583057404, 0.0], [0.8117647171020508, 0.16862745583057404, 0.003921568859368563], [0.8117647171020508, 0.16862745583057404, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.01568627543747425], [0.8117647171020508, 0.0, 0.0], [0.8196078538894653, 0.0, 0.007843137718737125], [0.8156862854957581, 0.0, 0.019607843831181526], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.3686274588108063, 0.0], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.01568627543747425], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.0117647061124444], [0.8117647171020508, 0.0, 0.007843137718737125], [0.8117647171020508, 0.0, 0.0], [0.8509804010391235, 0.0, 0.10196078568696976], [0.8235294222831726, 0.0, 0.0470588244497776], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8274509906768799, 0.0, 0.054901961237192154], [0.8117647171020508, 0.0, 0.0], [0.8117647171020508, 0.0, 0.0], [0.8196078538894653, 0.0, 0.03921568766236305], [0.8117647171020508, 0.007843137718737125, 0.0]].as_slice(), [[2, 0, 1], [3, 4, 5], [8, 6, 7], [11, 9, 10], [14, 12, 13], [15, 16, 17], [18, 19, 20], [21, 22, 23], [26, 24, 25], [27, 28, 29], [30, 31, 32], [35, 33, 34]].as_slice())),
             Content::Coin(_) => Some(([(-6.208817349140361e-10, 0.25122952461242676, 0.012981771491467953), (-0.2377641350030899, 0.07848376780748367, 0.012981771491467953), (-0.14694631099700928, -0.20102474093437195, 0.012981771491467953), (0.14694631099700928, -0.20102474093437195, 0.012981771491467953), (0.2377641350030899, 0.07848376780748367, 0.012981771491467953), (-6.208817349140361e-10, 0.25122952461242676, 0.038945313543081284), (-0.2377641350030899, 0.07848376780748367, 0.038945313543081284), (-0.14694631099700928, -0.20102474093437195, 0.038945313543081284), (0.14694631099700928, -0.20102474093437195, 0.038945313543081284), (0.2377641350030899, 0.07848376780748367, 0.038945313543081284)].as_slice(), [[1.0, 0.843137264251709, 0.08235294371843338], [1.0, 0.843137264251709, 0.0], [1.0, 0.843137264251709, 0.0], [1.0, 0.843137264251709, 0.007843137718737125], [1.0, 0.843137264251709, 0.03529411926865578], [1.0, 0.843137264251709, 0.0235294122248888], [1.0, 0.843137264251709, 0.0], [1.0, 0.843137264251709, 0.0], [1.0, 0.843137264251709, 0.0], [1.0, 0.843137264251709, 0.0]].as_slice(), [[4, 2, 1], [6, 8, 9], [0, 9, 4], [3, 7, 2], [1, 5, 0], [4, 8, 3], [2, 6, 1], [1, 0, 4], [4, 3, 2], [9, 5, 6], [6, 7, 8], [0, 5, 9], [3, 8, 7], [1, 6, 5], [4, 9, 8], [2, 7, 6]].as_slice())),
             Content::Bin(_) => Some(([(8.75, 0.25, -0.11763688921928406), (9.25, 0.25, 0.6470893621444702), (9.25, 0.25, -0.11763688921928406), (8.75, -0.25, -0.11763688921928406), (8.75, -0.25, 0.6470893621444702), (8.75, -0.25, 0.0874662846326828), (8.75, 0.25, 0.0874662846326828), (9.25, -0.25, 0.0874662846326828), (9.25, 0.25, 0.0874662846326828), (8.75, 0.25, 0.6470893621444702), (9.25, -0.25, -0.11763688921928406), (9.25, -0.25, 0.6470893621444702)].as_slice(), [[0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.4470588266849518, 0.4470588266849518, 0.4470588266849518], [0.42352941632270813, 0.42352941632270813, 0.42352941632270813], [0.42352941632270813, 0.42352941632270813, 0.42352941632270813], [0.42352941632270813, 0.42352941632270813, 0.42352941632270813], [0.42352941632270813, 0.42352941632270813, 0.42352941632270813]].as_slice(), [[4, 0, 3], [11, 3, 10], [9, 2, 0], [1, 10, 2], [7, 6, 5], [4, 9, 0], [11, 4, 3], [9, 1, 2], [1, 11, 10], [7, 8, 6]].as_slice())),
             Content::Garbage(_) => Some(([(-0.4120151996612549, 0.0023247026838362217, 0.4016544222831726), (-0.660269558429718, 0.0023247464559972286, -0.476776123046875), (0.13029776513576508, 0.6880912184715271, -0.49337661266326904), (0.4024461507797241, -0.6636604070663452, -0.4921177625656128)].as_slice(), [[0.15294118225574493, 0.15294118225574493, 0.15294118225574493], [0.15294118225574493, 0.15294118225574493, 0.15294118225574493], [0.1568627506494522, 0.1568627506494522, 0.1568627506494522], [0.15294118225574493, 0.15294118225574493, 0.15294118225574493]].as_slice(), [[0, 1, 3], [3, 1, 2], [2, 0, 3], [2, 1, 0]].as_slice())),
@@ -358,16 +374,20 @@ with open(save_to_file, 'w') as file:
             Content::JollyBlock(_) => Some(([(-0.25, -0.25, -0.04999999701976776), (-0.25, -0.25, 0.44999998807907104), (-0.25, 0.25, -0.04999999701976776), (-0.25, 0.25, 0.44999998807907104), (0.25, -0.25, -0.04999999701976776), (0.25, -0.25, 0.44999998807907104), (0.25, 0.25, -0.04999999701976776), (0.25, 0.25, 0.44999998807907104), (-0.025000005960464478, 0.1839064508676529, 0.45499998331069946), (-0.025000005960464478, -0.05087052285671234, 0.45499998331069946), (0.025000005960464478, 0.1839064508676529, 0.45499998331069946), (0.025000005960464478, -0.05087052285671234, 0.45499998331069946), (-0.025000005960464478, -0.1547078639268875, 0.45499998331069946), (-0.025000005960464478, -0.10470785200595856, 0.45499998331069946), (0.025000005960464478, -0.1547078639268875, 0.45499998331069946), (0.025000005960464478, -0.10470785200595856, 0.45499998331069946)].as_slice(), [[0.658823549747467, 0.0, 0.6352941393852234], [0.658823549747467, 0.0, 0.6352941393852234], [0.658823549747467, 0.007843137718737125, 0.6352941393852234], [0.658823549747467, 0.003921568859368563, 0.6352941393852234], [0.6549019813537598, 0.01568627543747425, 0.6313725709915161], [0.658823549747467, 0.0, 0.6352941393852234], [0.658823549747467, 0.003921568859368563, 0.6352941393852234], [0.658823549747467, 0.0117647061124444, 0.6352941393852234], [0.9137254953384399, 0.8392156958580017, 0.9058823585510254], [1.0, 1.0, 1.0], [0.9960784316062927, 0.9960784316062927, 0.9960784316062927], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [0.8901960849761963, 0.7921568751335144, 0.8823529481887817], [1.0, 1.0, 1.0]].as_slice(), [[1, 2, 0], [3, 6, 2], [7, 4, 6], [5, 0, 4], [6, 0, 2], [3, 5, 7], [1, 3, 2], [3, 7, 6], [7, 5, 4], [5, 1, 0], [6, 4, 0], [3, 1, 5], [11, 8, 10], [15, 12, 14], [11, 9, 8], [15, 13, 12]].as_slice())),
             Content::Scarecrow => Some(([(0.1743094027042389, -0.13636961579322815, -0.71045982837677), (-0.006979605183005333, -0.07481520622968674, 1.336403727531433), (-0.22681492567062378, 0.044787030667066574, -0.71045982837677), (-0.16167815029621124, -0.34636178612709045, -0.71045982837677), (0.081735759973526, 0.02491089701652527, 1.560507893562317), (0.008452866226434708, -0.07585588097572327, 1.1426702737808228), (0.006344068795442581, -0.22144824266433716, 1.0924530029296875), (0.8502382636070251, -0.07481520622968674, 1.2709208726882935), (0.006344068795442581, 0.03810186684131622, 1.049230933189392), (-0.22620485723018646, -0.07481519877910614, 1.5208446979522705), (-0.8367131948471069, -0.07481535524129868, 1.2709228992462158), (0.04202096164226532, -0.21554821729660034, 1.5553925037384033)].as_slice(), [[0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.5764706134796143, 0.5098039507865906, 0.11372549086809158], [0.6901960968971252, 0.6196078658103943, 0.23137255012989044], [0.686274528503418, 0.6196078658103943, 0.23137255012989044], [0.6901960968971252, 0.6196078658103943, 0.22745098173618317], [0.5921568870544434, 0.5254902243614197, 0.13333334028720856], [0.686274528503418, 0.615686297416687, 0.23529411852359772]].as_slice(), [[0, 1, 3], [3, 1, 2], [2, 0, 3], [2, 1, 0], [6, 7, 8], [4, 9, 11], [7, 6, 10], [11, 5, 4], [9, 5, 11], [4, 5, 9], [8, 7, 10], [6, 8, 10]].as_slice())),
 
-
             Content::Water(_) | Content::None => { None }
-        }.map(|(pos, colors, indices)| {
+        }
+        .map(|(pos, colors, indices)| {
             let mut vertices = [Vertex::null(); Self::MESH_LEN*2];
 
             let mut rng = SmallRng::seed_from_u64(tile_pos.x as u64 + ((tile_pos.y as u64) << 32));
             let angle = if Self::content_mesh_should_rotate(c) {
                 let angle_distr = rand::distributions::Uniform::new(0.0, 2.0 * std::f32::consts::PI);
-                Some(rng.sample(angle_distr))
-            } else { None };
+                rng.sample(angle_distr)
+            } else {
+                //rotate by increments of 90 degrees
+                let int_distr = rand::distributions::Uniform::new(0, 4);
+                rng.sample(int_distr) as f32 * (PI / 2.0)
+            };
 
             for (i, tri_indices) in indices.iter().cloned().enumerate() {
                 let color = colors[tri_indices[0]];
@@ -377,10 +397,7 @@ with open(save_to_file, 'w') as file:
                     // blender's coordinate space inverts y and z compared to ours
                     let position = vec3(x, z, y);
                     //randomly rotate the content mesh
-                    let position = match angle {
-                        None => position,
-                        Some(angle) => rotate_vec3(&position, angle, &vec3(0.0, 1.0, 0.0)),
-                    };
+                    let position = rotate_vec3(&position, angle, &vec3(0.0, 1.0, 0.0));
                     //sum the position of the tile
                     let position = position + vec3(tile_pos.x as f32 + 0.5, elevation_to_mesh_space_y(elevation as f32), tile_pos.y as f32 + 0.5);
                     //convert to array
@@ -405,6 +422,63 @@ with open(save_to_file, 'w') as file:
             Content::Building | Content::None => false,
         }
     }
+
+    fn get_skybox_mesh(env_cond: &EnvironmentalConditions, world_size: usize, enable_skybox: bool) -> [Vertex; Self::MESH_LEN] {
+        if !enable_skybox {
+            return Self::null_mesh();
+        }
+        let world_size = world_size as f32;
+        let color_gradient_for_weather = match env_cond.get_weather_condition() {
+            WeatherType::Sunny =>           [vec3(0.7, 0.7, 1.0), vec3(0.5, 0.4, 0.4), vec3(0.1, 0.1, 0.1)],
+            WeatherType::Rainy =>           [vec3(0.6, 0.6, 0.8), vec3(0.5, 0.5, 0.7), vec3(0.0, 0.0, 0.0)],
+            WeatherType::Foggy =>           [vec3(0.6, 0.6, 0.6), vec3(0.5, 0.5, 0.5), vec3(0.0, 0.0, 0.0)],
+            WeatherType::TropicalMonsoon => [vec3(0.1, 0.1, 0.1), vec3(0.2, 0.2, 0.2), vec3(0.0, 0.0, 0.0)],
+            WeatherType::TrentinoSnow =>    [vec3(0.6, 0.6, 0.6), vec3(0.4, 0.4, 0.4), vec3(0.3, 0.3, 0.3)],
+        };
+        let color_for_time_of_day = match env_cond.get_time_of_day() {
+            DayTime::Morning =>     vec3(1.0, 1.0, 1.0),
+            DayTime::Afternoon =>   vec3(1.0, 0.9, 0.9),
+            DayTime::Night =>       vec3(0.3, 0.3, 0.3),
+        };
+
+        let color_gradient = color_gradient_for_weather.map(|c_w| {
+            let c_t = color_for_time_of_day;
+            [c_w.x*c_t.x, c_w.y*c_t.y, c_w.z*c_t.z]
+        });
+
+        let octahedron = [
+            [ 0.0,  1.0,  0.0 ],
+            [-1.0,  0.0, -1.0 ],
+            [ 1.0,  0.0, -1.0 ],
+            [ 1.0,  0.0,  1.0 ],
+            [-1.0,  0.0,  1.0 ],
+            [ 0.0, -1.0,  0.0 ],
+        ];
+        //scale
+        let octahedron_correct_size = octahedron.map(|p| p.map(|n| n * world_size * 2.1));
+        //translate
+        let positions_repetitionless = octahedron_correct_size.map(|[x,y,z]| [x + world_size / 2.0,y,z + world_size / 2.0]);
+
+        let mut vertices_repetitionless = [Vertex::null(); 6];
+        for i in 0..6 {
+            let position = positions_repetitionless[i];
+            let color = if i == 0 { color_gradient[0] } else if i == 5 { color_gradient[2] } else { color_gradient[1] };
+            vertices_repetitionless[i] = Vertex { position, color }
+        }
+
+        let indices = [
+            0, 1, 2,
+            0, 2, 3,
+            0, 3, 4,
+            0, 4, 1,
+            5, 1, 2,
+            5, 2, 3,
+            5, 3, 4,
+            5, 4, 1,
+        ];
+
+        indices.map(|i| vertices_repetitionless[i])
+    }
 }
 
 fn tile_to_color(t: &Tile) -> Vec3 {
@@ -428,6 +502,14 @@ fn rand_displace_vec(v: Vec3, amount: f32, rng: &mut impl Rng) -> Vec3 {
     let distr = rand::distributions::Uniform::new(-1.0, 1.0);
     v.map(|n| n + amount * rng.sample(distr))
 }
+
+/*
+  given a position p returns the elevation. note that p is not in the world space but rather a
+  "position index", which basically simply means that it is in world space * 2. an index couple
+  (i,j) that is divisible by 2 will simply return the elevation of the tile (i/2, j/2), and the
+  indices in between are used for intermediate vertices, and return values interpolated between
+  the tiles around them.
+*/
 fn get_elevation(mut p: (usize, usize), w: &Vec<Vec<Option<Tile>>>) -> Option<f32> {
     if p.0 == 0 { p.0 += 1; }
     if p.1 == 0 { p.1 += 1; }

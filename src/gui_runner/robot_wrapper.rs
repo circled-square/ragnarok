@@ -11,12 +11,12 @@ use crate::utils::coord_to_robot_position;
 
 pub struct RobotWrapper {
     ai: Box<dyn Runnable>,
-    to_gui_tx: SyncSender<PartialWorld>,
+    to_worker_tx: SyncSender<PartialWorld>,
     is_first_tick: bool,
 }
 impl RobotWrapper {
-    pub fn new(ai: Box<dyn Runnable>, to_gui_tx: SyncSender<PartialWorld>) -> Self {
-        Self { ai, to_gui_tx, is_first_tick: true }
+    pub fn new(ai: Box<dyn Runnable>, to_worker_tx: SyncSender<PartialWorld>) -> Self {
+        Self { ai, to_worker_tx, is_first_tick: true }
     }
 }
 impl Runnable for RobotWrapper {
@@ -28,7 +28,7 @@ impl Runnable for RobotWrapper {
             self.is_first_tick = false;
         }
 
-        let world_data = PartialWorld{
+        let world_data = PartialWorld {
             world: robotics_lib::interface::robot_map(world).unwrap(),
             tiles_to_refresh: HashSet::new(),
             robot_position: coord_to_robot_position(self.get_coordinate()),
@@ -36,7 +36,7 @@ impl Runnable for RobotWrapper {
             backpack: self.get_backpack().get_contents().clone(),
             env_cond: robotics_lib::interface::look_at_sky(&world),
         };
-        let _ = self.to_gui_tx.send(world_data); // do not unwrap, since Err simply means the GUI was closed and this thread is also about to exit
+        let _ = self.to_worker_tx.send(world_data); // do not unwrap, since Err simply means the GUI was closed and this thread is also about to exit
     }
 
     fn handle_event(&mut self, event: Event) {

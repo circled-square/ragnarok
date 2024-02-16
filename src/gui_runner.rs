@@ -47,7 +47,7 @@ impl GuiRunner {
     pub fn new(robot: Box<dyn Runnable>, generator: &mut impl Generator) -> Result<GuiRunner, LibError> {
         let (game_to_worker_tx, game_to_worker_rx) = sync::mpsc::sync_channel::<PartialWorld>(1);
         let (worker_to_gui_tx, worker_to_gui_rx) = sync::mpsc::channel::<PartialWorld>();
-        let (gui_to_game_tx, gui_to_game_rx) = sync::mpsc::sync_channel::<RunMode>(1);
+        let (gui_to_game_tx, gui_to_game_rx) = sync::mpsc::channel::<RunMode>();
 
         let robot_wrapper = RobotWrapper::new(robot, game_to_worker_tx);
 

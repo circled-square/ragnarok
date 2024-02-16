@@ -4,7 +4,7 @@ mod keyboard_event_handler;
 mod frame_delta_timer;
 
 use std::f32::consts::PI;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
@@ -22,10 +22,10 @@ use super::{PartialWorld, RunMode};
 
 pub struct GUIThread {
     worker_to_gui_rx: Receiver<PartialWorld>,
-    gui_to_game_tx: SyncSender<RunMode>,
+    gui_to_game_tx: Sender<RunMode>,
 }
 impl GUIThread {
-    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: SyncSender<RunMode>) -> Self {
+    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: Sender<RunMode>) -> Self {
         Self { worker_to_gui_rx, gui_to_game_tx }
     }
     pub fn start(self) -> thread::JoinHandle<()> {
@@ -59,13 +59,12 @@ pub fn proj_matrix(frame: &Frame, fov: f32) -> Mat4 {
     let (width, height) = frame.get_dimensions();
     let aspect_ratio = width as f32 / height as f32;
 
-    glm::perspective_lh(aspect_ratio, fov, 0.05, 1024.0)
+    glm::perspective_lh(aspect_ratio, fov, 1.0/32.0, 8192.0)
 }
 
 pub struct GUI {
-    // world: Arc<Mutex<SharedState>>,
-    rx_from_game: Receiver<PartialWorld>,
-    tx_to_game: SyncSender<RunMode>,
+    rx_from_worker: Receiver<PartialWorld>,
+    tx_to_game: Sender<RunMode>,
     world_copy: PartialWorld,
 
     event_loop: EventLoop<()>,
@@ -81,7 +80,7 @@ pub struct GUI {
 }
 
 impl GUI {
-    pub fn new(window_title: &str, rx_from_game: Receiver<PartialWorld>, tx_to_game: SyncSender<RunMode>) -> Self {
+    pub fn new(window_title: &str, rx_from_worker: Receiver<PartialWorld>, tx_to_game: Sender<RunMode>) -> Self {
         let event_loop =
             winit::event_loop::EventLoopBuilder::new()
             .with_any_thread(true)
@@ -101,15 +100,29 @@ impl GUI {
         imgui_platform.attach_window(imgui_ctx.io_mut(), &display.gl_window().window(), HiDpiMode::Default);
 
         let imgui_renderer = imgui_glium_renderer::Renderer::init(&mut imgui_ctx, &display).unwrap();
-        let world_copy = rx_from_game.recv().unwrap();
+        let world_copy = rx_from_worker.recv().unwrap();
         let world_mesh = WorldMesh::new(10, &display);
         let shader_program = shaders::make_program(&display).unwrap();
 
         let kbd_event_handler = KeyboardEventHandler::new(50.0, 1.0);
 
-        Self { rx_from_game, tx_to_game, world_copy, event_loop, display, imgui_ctx, imgui_platform, imgui_renderer, world_mesh, shader_program, kbd_event_handler }
+        Self { rx_from_worker, tx_to_game, world_copy, event_loop, display, imgui_ctx, imgui_platform, imgui_renderer, world_mesh, shader_program, kbd_event_handler }
     }
 
+    fn toggle_continuous_mode(run_mode: &mut RunMode, tx_to_game: &Sender<RunMode>, last_was_uncapped: bool, last_ticks_per_second_cap: f32) {
+        *run_mode = match run_mode {
+            RunMode::Continuous(_) => RunMode::Paused,
+            _ => {
+                let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
+                RunMode::Continuous(cap)
+            }
+        };
+        let _ = tx_to_game.send(*run_mode);
+    }
+    fn request_single_tick(run_mode: &mut RunMode, tx_to_game: &Sender<RunMode>) {
+        *run_mode = RunMode::SingleTick;
+        let _ = tx_to_game.send(*run_mode);
+    }
     pub fn run(mut self) -> () {
         let mut kbd_input = ProcessedKeyboardInput::default();
         let (mut cam_dir, mut cam_pos) = {
@@ -129,6 +142,7 @@ impl GUI {
         let mut last_was_uncapped = false;
         let mut follow_robot = false;
         let mut find_robot = false;
+        let mut enable_skybox = true;
 
         let mut run_mode = RunMode::Paused;
 
@@ -139,7 +153,7 @@ impl GUI {
                 winit::event::Event::WindowEvent { event, .. } => match event {
                     winit::event::WindowEvent::CloseRequested => {
                         run_mode = RunMode::Terminate;
-                        let _ = self.tx_to_game.try_send(run_mode);
+                        let _ = self.tx_to_game.send(run_mode);
 
                         _control_flow.set_exit();
                     },
@@ -147,18 +161,11 @@ impl GUI {
                         kbd_input = self.kbd_event_handler.process_input(input);
 
                         if kbd_input.toggle_continuous_mode {
-                            run_mode = match &run_mode {
-                                RunMode::Continuous(_) => RunMode::Paused,
-                                _ => {
-                                    let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                    RunMode::Continuous(cap)
-                                }
-                            };
-                            let _ = self.tx_to_game.try_send(run_mode);
+                            Self::toggle_continuous_mode(&mut run_mode, &self.tx_to_game, last_was_uncapped, last_ticks_per_second_cap);
                         } else if kbd_input.single_tick {
-                            run_mode = RunMode::SingleTick;
-                            let _ = self.tx_to_game.try_send(run_mode);
+                            Self::request_single_tick(&mut run_mode, &self.tx_to_game);
                         }
+
                         if kbd_input.toggle_follow_robot {
                             follow_robot = !follow_robot;
                         }
@@ -172,7 +179,7 @@ impl GUI {
 
                     // update world_copy
                     {
-                        let new_world = self.rx_from_game.try_iter().last();
+                        let new_world = self.rx_from_worker.try_iter().last();
 
                         if let Some(new_world) = new_world {
                             self.world_copy = new_world;
@@ -191,7 +198,10 @@ impl GUI {
 
                         find_robot = false;
                     }
-
+                    let world_size = self.world_copy.world.len() as f32;
+                    cam_pos.x = cam_pos.x.clamp(0.0, world_size);
+                    cam_pos.y = cam_pos.y.clamp(-world_size / 2.0, world_size / 2.0);
+                    cam_pos.z = cam_pos.z.clamp(0.0, world_size);
 
                     // rendering
                     {
@@ -214,12 +224,12 @@ impl GUI {
                             .. Default::default()
                         };
 
-                        target.clear_color_and_depth((0.0, 0.0, 0.0, 1.0), 1.0);
+                        target.clear_color_and_depth((0.2, 0.2, 0.2, 1.0), 1.0);
 
                         //render world
                         {
                             // update vbo with new world information
-                            self.world_mesh.update(&mut self.world_copy, &self.display);
+                            self.world_mesh.update(&mut self.world_copy, &self.display, enable_skybox);
                             self.world_copy.tiles_to_refresh.clear();
 
                             target.draw(&self.world_mesh.vbo, &glium::index::NoIndices(PrimitiveType::TrianglesList),
@@ -232,7 +242,7 @@ impl GUI {
                             let ui = self.imgui_ctx.new_frame();
                             self.imgui_platform.prepare_render(&ui, self.display.gl_window().window());
 
-                            ui.window("Info")
+                            ui.window("Ragnarok")
                                 .size([300.0, 550.0], Condition::FirstUseEver)
                                 .build(|| {
                                     if ui.collapsing_header("Simulation settings", TreeNodeFlags::DEFAULT_OPEN) {
@@ -243,25 +253,16 @@ impl GUI {
                                             _ => false,
                                         };
 
-                                        if continuous {
-                                            if ui.button("Stop") {
-                                                run_mode = RunMode::Paused;
-                                                let _ = self.tx_to_game.try_send(run_mode);
-                                            }
-                                        } else {
-                                            if ui.button("Run") {
-                                                let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
-                                                run_mode = RunMode::Continuous(cap);
-                                                let _ = self.tx_to_game.try_send(run_mode);
-                                            }
+                                        let btn_text = if continuous {"Stop"} else {"Run"};
+                                        if ui.button(btn_text) {
+                                            Self::toggle_continuous_mode(&mut run_mode, &self.tx_to_game, last_was_uncapped, last_ticks_per_second_cap);
                                         }
 
                                         ui.same_line();
 
                                         ui.disabled(continuous, || {
                                             if ui.button("Run single tick") {
-                                                run_mode = RunMode::SingleTick;
-                                                let _ = self.tx_to_game.try_send(run_mode);
+                                                Self::request_single_tick(&mut run_mode, &self.tx_to_game);
                                             }
                                         });
 
@@ -277,7 +278,7 @@ impl GUI {
                                             Some(ui.push_style_color(StyleColor::Text, [0.4, 0.4, 0.4, 1.0]))
                                         } else { None };
 
-                                       changed = changed || ui.slider_config("speed", 0.1, 200.0)
+                                       changed = changed || ui.slider_config("speed", 1.0, 200.0)
                                            .flags(SliderFlags::LOGARITHMIC)
                                            .build(&mut last_ticks_per_second_cap);
                                         if let Some(t) = greyed_out_text_if_uncapped { t.pop(); }
@@ -286,11 +287,13 @@ impl GUI {
                                         let cap = if last_was_uncapped { None } else { Some(last_ticks_per_second_cap) };
                                         if changed && continuous {
                                             run_mode = RunMode::Continuous(cap);
-                                            let _ = self.tx_to_game.try_send(run_mode);
+                                            let _ = self.tx_to_game.send(run_mode);
                                         }
 
                                         ui.unindent();
                                     }
+
+                                    ui.separator();
 
                                     if ui.collapsing_header("Robot", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
@@ -300,6 +303,8 @@ impl GUI {
                                             ui.same_line();
                                             find_robot = find_robot || ui.button("Find robot");
                                         });
+
+                                        ui.text_wrapped(format!("Position: {:?}", self.world_copy.robot_position.as_ref()));
 
                                         ui.text_wrapped("Energy:");
                                         ui.same_line();
@@ -331,9 +336,10 @@ impl GUI {
 
                                     if ui.collapsing_header("Environmental conditions", TreeNodeFlags::DEFAULT_OPEN) {
                                         ui.indent();
-
-                                        ui.text_wrapped(format!("Time of day: {:?}", self.world_copy.env_cond.get_time_of_day()));
-                                        ui.text_wrapped(format!("Weather: {:?}", self.world_copy.env_cond.get_weather_condition()));
+                                        let env = &self.world_copy.env_cond;
+                                        ui.text_wrapped(format!("Time of day: {}, {:?}", env.get_time_of_day_string(), env.get_time_of_day()));
+                                        ui.text_wrapped(format!("Weather: {:?}", env.get_weather_condition()));
+                                        ui.checkbox("Enable skybox", &mut enable_skybox);
 
                                         ui.unindent();
                                     }
@@ -348,7 +354,8 @@ impl GUI {
 
                                     ui.separator();
 
-                                    ui.text(format!("FPS: {}", frame_delta_timer.get_average_fps() as u32));
+                                    ui.text_wrapped(format!("FPS: {}", frame_delta_timer.get_average_fps() as u32));
+                                    ui.text_wrapped(format!("cam position: {:?}", cam_pos.as_ref()));
                                 });
 
                             let draw_data = self.imgui_ctx.render();
