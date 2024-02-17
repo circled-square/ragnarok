@@ -14,7 +14,13 @@ use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 use nalgebra_glm as glm;
 use glm::{Mat4, Vec3, vec3};
+#[cfg(target_os = "linux")]
 use winit::platform::unix::EventLoopBuilderExtUnix;
+#[cfg(target_os = "windows")]
+use winit::platform::windows::EventLoopBuilderExtWindows;
+#[cfg(target_os = "macos")]
+use winit::platform::macos::EventLoopBuilderExtMacOS;
+
 use world_mesh::WorldMesh;
 use crate::gui_runner::gui::frame_delta_timer::FrameDeltaTimer;
 use crate::gui_runner::gui::keyboard_event_handler::{KeyboardEventHandler, ProcessedKeyboardInput};
