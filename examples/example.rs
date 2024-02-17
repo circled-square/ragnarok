@@ -45,7 +45,7 @@ impl Runnable for ExampleRobot {
 
 fn main() {
     let robot = ExampleRobot::new();
-    let mut world_generator = MyWorldGen::new_param(500, 1, 1, 1, false, false, 0, false, None);
+    let mut world_generator = MyWorldGen::new_param(500, 5, 5, 5, false, false, 5, false, Some(1));
 
     let gui_runner = GuiRunner::new(Box::new(robot), &mut world_generator).unwrap();
 
