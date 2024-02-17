@@ -1,6 +1,6 @@
 [package]
 name = "ragnarok"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 authors = ["Matteo Possami (circled-square)"]
 publish = ["kellnr"]
@@ -10,7 +10,6 @@ glium = {  version = "0.32.1", features = ["glutin"] }
 glutin = {  version = "0.31.3" }
 glutin-winit = "0.2.2"
 imgui = "0.11.0"
-imgui-rs = "1.47.0"
 imgui-glium-renderer = "0.11.0"
 imgui-winit-support = "0.11.0"
 winit = "0.27.5"
