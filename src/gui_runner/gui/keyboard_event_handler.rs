@@ -148,7 +148,7 @@ impl ProcessedKeyboardInput {
         cam_dir = glm::rotate_vec3(&cam_dir, cam_turn_speed.x * delta, &up);
         cam_dir = glm::rotate_vec3(&cam_dir, cam_turn_speed.y * delta, &cam_dir_right);
         cam_dir = cam_dir.normalize();
-        cam_dir.y = cam_dir.y.clamp(-0.7, 0.7);
+        cam_dir.y = cam_dir.y.clamp(-0.9, 0.9);
         cam_dir = cam_dir.normalize();
 
         cam_dir

@@ -1,4 +1,3 @@
-use std::cmp::{max, min};
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
@@ -33,9 +32,11 @@ impl WorkerThread {
                             if world_copy[x][y] != new_world.world[x][y] {
                                 world_copy[x][y] = new_world.world[x][y].clone();
 
-                                for x in max(x, 1) - 1..=min(x + 1, new_world.world.len() - 1) {
-                                    for y in max(y, 1) - 1..=min(y + 1, new_world.world.len() - 1) {
-                                        tiles_to_refresh.insert(vec2(x as u32, y as u32));
+                                for dx in -1..=1 {
+                                    for dy in -1..=1 {
+                                        let x = (x as i32 + dx).clamp(0, new_world.world.len() as i32 - 1) as u32;
+                                        let y = (y as i32 + dy).clamp(0, new_world.world.len() as i32 - 1) as u32;
+                                        tiles_to_refresh.insert(vec2(x, y));
                                     }
                                 }
                             }
@@ -43,8 +44,13 @@ impl WorkerThread {
                     }
                 } else {
                     world_copy = Some(new_world.world.clone());
-                    for x in max(new_world.robot_position.x, 1) - 1..=min(new_world.robot_position.x + 1, new_world.world.len() as u32 - 1) {
-                        for y in max(new_world.robot_position.y, 1) - 1..=min(new_world.robot_position.y + 1, new_world.world.len() as u32 - 1) {
+                    let world_size = new_world.world.len();
+                    let x = new_world.robot_position.x;
+                    let y = new_world.robot_position.y;
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            let x = (x as i32 + dx).clamp(0, world_size as i32 - 1) as u32;
+                            let y = (y as i32 + dy).clamp(0, world_size as i32 - 1) as u32;
                             tiles_to_refresh.insert(vec2(x, y));
                         }
                     }

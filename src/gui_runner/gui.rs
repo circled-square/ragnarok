@@ -3,6 +3,7 @@ mod shaders;
 mod keyboard_event_handler;
 mod frame_delta_timer;
 
+use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
@@ -14,6 +15,8 @@ use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 use nalgebra_glm as glm;
 use glm::{Mat4, Vec3, vec3};
+
+//extension that allows running winit on a thread that isn't the main thread. necessary since it's hard to run robotics lib outside of main thread
 #[cfg(target_os = "linux")]
 use winit::platform::unix::EventLoopBuilderExtUnix;
 #[cfg(target_os = "windows")]
@@ -184,10 +187,17 @@ impl GUI {
 
                     // update world_copy
                     {
-                        let new_world = self.rx_from_worker.try_iter().last();
+                        let mut tiles_to_refresh = HashSet::new();
+                        let mut new_world = None;
+                        for mut received_world in self.rx_from_worker.try_iter() {
+                            tiles_to_refresh.extend(received_world.tiles_to_refresh.drain());
+
+                            new_world = Some(received_world);
+                        }
 
                         if let Some(new_world) = new_world {
                             self.world_copy = new_world;
+                            self.world_copy.tiles_to_refresh = tiles_to_refresh;
                         }
                     }
 

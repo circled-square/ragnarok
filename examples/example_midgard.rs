@@ -1,6 +1,5 @@
 use rand::random;
 use robotics_lib::runner::{Runnable};
-use rip_worldgenerator::MyWorldGen;
 use robotics_lib::energy::Energy;
 use robotics_lib::event::events::Event;
 use robotics_lib::interface::Direction;
@@ -8,6 +7,8 @@ use robotics_lib::runner::backpack::BackPack;
 use robotics_lib::world::coordinates::Coordinate;
 use robotics_lib::world::World;
 use ragnarok::GuiRunner;
+use midgard::world_generator::WorldGenerator;
+use midgard::world_generator::WorldGeneratorParameters;
 
 
 pub struct ExampleRobot {
@@ -44,8 +45,16 @@ impl Runnable for ExampleRobot {
 
 fn main() {
     let robot = ExampleRobot::new();
-    let mut world_generator = MyWorldGen::new_param(500, 5, 5, 5, false, false, 5, false, Some(1));
 
+    let params = WorldGeneratorParameters {
+        seed: 5833819153164965805,
+        amount_of_rivers: Some(1.0),
+        amount_of_streets: Some(1.0),
+        amount_of_teleports: Some(1.0),
+        elevation_multiplier: Some(100.0),
+        ..Default::default()
+    };
+    let mut world_generator = WorldGenerator::new(params);
     let gui_runner = GuiRunner::new(Box::new(robot), &mut world_generator).unwrap();
 
     gui_runner.run().unwrap();
