@@ -1,13 +1,13 @@
 [package]
 name = "ragnarok"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 authors = ["Matteo Possami (circled-square)"]
 publish = ["kellnr"]
 
 [dependencies]
 glium = {  version = "0.32.1", features = ["glutin"] }
-glutin = {  version = "0.31.2" }
+glutin = {  version = "0.31.3" }
 glutin-winit = "0.2.2"
 imgui = "0.11.0"
 imgui-rs = "1.47.0"
@@ -21,6 +21,7 @@ num-traits = "0.2.18"
 range-set = "0.0.11"
 
 robotics_lib = { version = "0.1.21", registry = "kellnr" }
+strum = "*"
 
 [dev-dependencies]
 rip_worldgenerator = { version = "0.5.57", registry = "kellnr" }

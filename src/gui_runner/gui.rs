@@ -100,7 +100,7 @@ impl GUI {
 
         let imgui_renderer = imgui_glium_renderer::Renderer::init(&mut imgui_ctx, &display).unwrap();
         let world_copy = rx_from_worker.recv().unwrap();
-        let world_mesh = WorldMesh::new(10, &display);
+        let world_mesh = WorldMesh::new(world_copy.world.len(), 10, &display);
         let shader_program = shaders::make_program(&display).unwrap();
 
         let kbd_event_handler = KeyboardEventHandler::new(50.0, 1.0);
