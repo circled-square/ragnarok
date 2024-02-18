@@ -1,5 +1,9 @@
 use std::time::SystemTime;
 
+// FrameDeltaTimer's get_delta_and_reset, if called every frame, returns the delta from the
+// frame (calculating time diff since last invocation). get_average_fps returns the average FPS over
+// the last few frames, taking into account frames up to 1 second old.
+
 pub struct FrameDeltaTimer {
     last_frame_time: SystemTime,
     circular_queue_deltas: [f32; 600],

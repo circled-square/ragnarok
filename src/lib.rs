@@ -41,11 +41,13 @@
 //!    gui_runner.run().unwrap();
 //!}
 //! ```
-mod gui_runner;
-mod utils;
-#[macro_use]
-extern crate glium;
 
 /// A wrapper of the Runner struct which runs the game and visualizes it in a GUI.
 ///
 pub use gui_runner::GuiRunner;
+
+
+#[macro_use]
+extern crate glium;
+
+mod gui_runner;

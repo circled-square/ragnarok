@@ -12,8 +12,10 @@ use robotics_lib::world::environmental_conditions::{DayTime, EnvironmentalCondit
 use strum::IntoEnumIterator;
 use crate::gui_runner::PartialWorld;
 
+// Vertex is the vertex type of our mesh. it needs to be public because glium needs to be able to
+// read the type to read the vertex buffer which will be of type VertexBuffer<Vertex>
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Vertex {
+pub struct Vertex {
     pub position: [f32; 3],
     pub color: [f32; 3],
 }
@@ -24,9 +26,19 @@ impl Vertex {
 implement_vertex!(Vertex, position, color);
 
 
-type SkyboxMeshArray = [[[Vertex; WorldMesh::MESH_LEN]; 3]; 5];
+// WorldMesh manages the world mesh and its vertex buffer in the gpu.
+// the following optimizations were implemented:
+// - minimize allocated memory by not allocating memory for undiscovered tiles and instead filling
+//   the vbo (Vertex Buffer Object) with new vertices as new tiles are discovered.
+// - avoid frequent reallocation with a policy similar to what is often used in dynamic arrays
+//   (grow() increases capacity by 1/2, shrink() decreases it to 2/3 when fill factor < 1/2).
+// - avoid moving vertices around when a bunch of vertices in between the array is removed by
+//   keeping track (through Self::empty_meshes) of the position of vertices that are allocated but
+//   not currently in use.
+// - minimize writes to the gpu, rewriting to gpu only the vertices which actually changed, and
+//   bunching together contiguous writes into a single write.
 
-pub(crate) struct WorldMesh {
+pub struct WorldMesh {
     pub vbo: VertexBuffer<Vertex>,
     pub verts: Vec<Vertex>,
 
@@ -51,6 +63,65 @@ impl WorldMesh {
             min_number_of_meshes,
             skybox_mesh_array: Self::generate_skybox_meshes(world_size)
         }
+    }
+    pub fn update(&mut self, world: &mut PartialWorld, display: &Display, enable_skybox: bool) {
+
+        //update robot mesh
+        {
+            let robot_vertices_repetitionless = [
+                [ 0.0, 0.0,  0.0],
+                [ 0.5, 1.0,  0.0],
+                [ 0.0, 1.0,  0.5],
+                [-0.5, 1.0,  0.0],
+                [ 0.0, 1.0, -0.5],
+                [ 0.0, 2.0,  0.0],
+            ];
+            let robot_tris = [
+                [0, 1, 2],
+                [0, 2, 3],
+                [0, 3, 4],
+                [0, 4, 1],
+                [5, 1, 2],
+                [5, 2, 3],
+                [5, 3, 4],
+                [5, 4, 1],
+            ].map(|tri| tri.map(|i| robot_vertices_repetitionless[i]));
+
+            let mut robot_color_rng = SmallRng::seed_from_u64(1);
+            let robot_position = (world.robot_position.x as usize * 2, world.robot_position.y as usize * 2);
+
+            let robot_vertices = robot_tris.map(|tri| {
+                let color = rand_displace_vec(vec3(0.2, 0.2, 0.2), 0.07, &mut robot_color_rng);
+                tri.map(|[x,y,z]| {
+                    Vertex {
+                        position: [
+                            world.robot_position.x as f32 + x + 0.5,
+                            get_elevation(robot_position, &world.world).unwrap() + y + 0.5,
+                            world.robot_position.y as f32 + z + 0.5
+                        ],
+                        color: *color.as_ref()
+                    }
+                })
+            }).into_iter().flatten().collect::<Vec<_>>();
+
+            assert_eq!(robot_vertices.len(), Self::MESH_LEN);
+            self.get_mut_mesh_at_index(0).copy_from_slice(&robot_vertices);
+        }
+
+        //update skybox mesh
+        let skybox_mesh = Self::get_skybox_mesh(&self.skybox_mesh_array, &world.env_cond, enable_skybox);
+        self.verts[Self::SKYBOX_MESH_INDEX..Self::SKYBOX_MESH_INDEX+Self::MESH_LEN].copy_from_slice(skybox_mesh);
+
+        //tile and content meshes
+        for tile_pos in world.tiles_to_refresh.iter().cloned() {
+            let tile = world.world[tile_pos.x as usize][tile_pos.y as usize].clone();
+            match tile {
+                None => {},
+                Some(tile) => self.insert_mesh(tile_pos, tile, &world.world),
+            };
+        }
+
+        self.update_vbo(&world.tiles_to_refresh, display);
     }
 
     fn get_mesh_at_index(&self, i: usize) -> &[Vertex] { &self.verts[i..i+Self::MESH_LEN] }
@@ -134,7 +205,7 @@ impl WorldMesh {
         self.tiles_positions_map.insert(tile_pos, (tile.clone(), meshes_indices));
     }
 
-    //resizes the memory to 2/3 of what it previously was. assumes all the vertices can fit in there
+    //resizes the memory to 2/3 of what it previously was. assumes fill_factor_is_low()==true
     fn shrink(&mut self) {
         assert!(self.fill_factor_is_low());
         let mut new_tiles_positions_map = HashMap::new();
@@ -225,65 +296,6 @@ impl WorldMesh {
         } else {
             self.vbo = VertexBuffer::dynamic(display, &self.verts).unwrap();
         }
-    }
-    pub fn update(&mut self, world: &mut PartialWorld, display: &Display, enable_skybox: bool) {
-
-        //update robot mesh
-        {
-            let robot_vertices_repetitionless = [
-                [ 0.0, 0.0,  0.0],
-                [ 0.5, 1.0,  0.0],
-                [ 0.0, 1.0,  0.5],
-                [-0.5, 1.0,  0.0],
-                [ 0.0, 1.0, -0.5],
-                [ 0.0, 2.0,  0.0],
-            ];
-            let robot_tris = [
-                [0, 1, 2],
-                [0, 2, 3],
-                [0, 3, 4],
-                [0, 4, 1],
-                [5, 1, 2],
-                [5, 2, 3],
-                [5, 3, 4],
-                [5, 4, 1],
-            ].map(|tri| tri.map(|i| robot_vertices_repetitionless[i]));
-
-            let mut robot_color_rng = SmallRng::seed_from_u64(1);
-            let robot_position = (world.robot_position.x as usize * 2, world.robot_position.y as usize * 2);
-
-            let robot_vertices = robot_tris.map(|tri| {
-                let color = rand_displace_vec(vec3(0.2, 0.2, 0.2), 0.07, &mut robot_color_rng);
-                tri.map(|[x,y,z]| {
-                    Vertex {
-                        position: [
-                            world.robot_position.x as f32 + x + 0.5,
-                            get_elevation(robot_position, &world.world).unwrap() + y + 0.5,
-                            world.robot_position.y as f32 + z + 0.5
-                        ],
-                        color: *color.as_ref()
-                    }
-                })
-            }).into_iter().flatten().collect::<Vec<_>>();
-
-            assert_eq!(robot_vertices.len(), Self::MESH_LEN);
-            self.get_mut_mesh_at_index(0).copy_from_slice(&robot_vertices);
-        }
-
-        //update skybox mesh
-        let skybox_mesh = Self::get_skybox_mesh(&self.skybox_mesh_array, &world.env_cond, enable_skybox);
-        self.verts[Self::SKYBOX_MESH_INDEX..Self::SKYBOX_MESH_INDEX+Self::MESH_LEN].copy_from_slice(skybox_mesh);
-
-        //tile and content meshes
-        for tile_pos in world.tiles_to_refresh.iter().cloned() {
-            let tile = world.world[tile_pos.x as usize][tile_pos.y as usize].clone();
-            match tile {
-                None => {},
-                Some(tile) => self.insert_mesh(tile_pos, tile, &world.world),
-            };
-        }
-
-        self.update_vbo(&world.tiles_to_refresh, display);
     }
     fn get_tile_mesh(t: &Tile, tile_pos: UVec2, world: &Vec<Vec<Option<Tile>>>) -> [Vertex; Self::MESH_LEN] {
         let color_displace_amount = 0.1;
@@ -424,7 +436,7 @@ with open(save_to_file, 'w') as file:
         }
     }
 
-    fn get_skybox_mesh<'a>(skybox_mesh_array: &'a SkyboxMeshArray, env_cond: &EnvironmentalConditions, enable_skybox: bool) -> &'a [Vertex; Self::MESH_LEN] {
+    fn get_skybox_mesh<'a>(skybox_mesh_array: &'a [[[Vertex; WorldMesh::MESH_LEN]; 3]; 5], env_cond: &EnvironmentalConditions, enable_skybox: bool) -> &'a [Vertex; Self::MESH_LEN] {
         if !enable_skybox {
             &Self::NULL_MESH
         } else {

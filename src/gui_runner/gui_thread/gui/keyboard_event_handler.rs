@@ -1,7 +1,12 @@
 use nalgebra_glm::{vec2, Vec2, Vec3, vec3};
 use winit::event::{ElementState, KeyboardInput, VirtualKeyCode};
-use crate::gui_runner::gui::UP;
 use nalgebra_glm as glm;
+use super::UP;
+
+// KeyboardEventHandler is a struct which given winit keyboard events processes them into
+// ProcessedKeyboardInput.
+// ProcessedKeyboardInput in turn is able to move and rotate the camera according to input,
+// and exposes all other types of input as public fields
 
 pub struct KeyboardEventHandler {
     sprint_pressed: bool,
@@ -136,17 +141,17 @@ pub struct ProcessedKeyboardInput {
 }
 
 impl ProcessedKeyboardInput {
-    pub fn update_cam_dir_and_pos(&self, cam_dir: &mut Vec3, cam_pos: &mut Vec3, delta: f32, up: Vec3) {
-        *cam_dir = Self::rotate_camera(*cam_dir, self.cam_turn_speed, delta, up);
+    pub fn update_cam_dir_and_pos(&self, cam_dir: &mut Vec3, cam_pos: &mut Vec3, delta: f32) {
+        *cam_dir = Self::rotate_camera(*cam_dir, self.cam_turn_speed, delta);
         *cam_pos += Self::camera_movement(*cam_dir, self.relative_cam_speed, delta);
     }
 
-    fn rotate_camera(cam_dir: Vec3, cam_turn_speed: Vec2, delta: f32, up: Vec3) -> Vec3 {
-        let cam_dir_right = cam_dir.cross(&up);
+    fn rotate_camera(cam_dir: Vec3, cam_turn_speed: Vec2, delta: f32) -> Vec3 {
+        let cam_dir_right = cam_dir.cross(&UP);
 
         let mut cam_dir= cam_dir;
-        cam_dir = glm::rotate_vec3(&cam_dir, cam_turn_speed.x * delta, &up);
         cam_dir = glm::rotate_vec3(&cam_dir, cam_turn_speed.y * delta, &cam_dir_right);
+        cam_dir = glm::rotate_vec3(&cam_dir, cam_turn_speed.x * delta, &UP);
         cam_dir = cam_dir.normalize();
         cam_dir.y = cam_dir.y.clamp(-0.9, 0.9);
         cam_dir = cam_dir.normalize();
@@ -155,6 +160,7 @@ impl ProcessedKeyboardInput {
     }
 
     fn camera_movement(cam_dir: Vec3, relative_cam_speed: Vec3, delta: f32) -> Vec3 {
+        const UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
         let cam_dir_right = cam_dir.cross(&UP);
         (relative_cam_speed.x * cam_dir + relative_cam_speed.y * cam_dir_right + relative_cam_speed.z * UP) * delta
     }

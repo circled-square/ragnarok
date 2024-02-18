@@ -3,8 +3,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use nalgebra_glm::vec2;
 use robotics_lib::world::tile::Tile;
-use crate::gui_runner::PartialWorld;
+use super::PartialWorld;
 
+// WorkerThread handles a thread which receives the world information from the game->worker channel
+// and relays it through the worker->gui channel after populating the PartialWorld::tiles_to_refresh
+// field with the positions of tiles that changed since the last PartialWorld received through the
+// game->worker channel.
 pub struct WorkerThread {
     game_to_worker_rx: Receiver<PartialWorld>,
     worker_to_gui_tx: Sender<PartialWorld>,

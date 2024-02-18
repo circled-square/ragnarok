@@ -1,13 +1,20 @@
 use std::collections::HashSet;
 use std::sync::mpsc::{SyncSender};
+use nalgebra_glm::UVec2;
 use robotics_lib::energy::Energy;
 use robotics_lib::event::events::Event;
 use robotics_lib::runner::backpack::BackPack;
 use robotics_lib::runner::Runnable;
 use robotics_lib::world::coordinates::Coordinate;
 use robotics_lib::world::World;
-use crate::gui_runner::PartialWorld;
-use crate::utils::coord_to_robot_position;
+use super::PartialWorld;
+
+// RobotWrapper is a wrapper around Runnable, which itself implements Runnable. It serves the
+// purpose of sending world information through the gui->worker channel, since robotics_lib offers
+// no way of doing this that wouldn't involve calling gui code in the Runnable. This is simply a
+// workaround which allows me to "have a full wine barrel and a drunk wife" (as they would say in
+// Italy) by seamlessly wrapping the user's robot in this struct which does all the ugly things
+// necessary to communicate with the gui.
 
 pub struct RobotWrapper {
     ai: Box<dyn Runnable>,
@@ -55,4 +62,7 @@ impl Runnable for RobotWrapper {
     fn get_coordinate_mut(&mut self) -> &mut Coordinate { self.ai.get_coordinate_mut() }
     fn get_backpack(&self) -> &BackPack { self.ai.get_backpack() }
     fn get_backpack_mut(&mut self) -> &mut BackPack { self.ai.get_backpack_mut() }
+}
+fn coord_to_robot_position(c: &Coordinate) -> UVec2 {
+    UVec2::new(c.get_row() as u32, c.get_col() as u32)
 }

@@ -2,88 +2,51 @@ mod world_mesh;
 mod shaders;
 mod keyboard_event_handler;
 mod frame_delta_timer;
+mod compute_mvp;
 
 use std::collections::HashSet;
-use std::f32::consts::PI;
 use std::sync::mpsc::{Receiver, Sender};
-use std::thread;
-use glium::{Display, Frame, Program, Surface};
 use glium::index::PrimitiveType;
+use glium::Surface;
 use imgui::{Condition, SliderFlags, StyleColor, TreeNodeFlags};
 use imgui_winit_support::HiDpiMode;
-use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 use nalgebra_glm as glm;
-use glm::{Mat4, Vec3, vec3};
-
-//extension that allows running winit on a thread that isn't the main thread. necessary since it's hard to run robotics lib outside of main thread
-#[cfg(target_os = "linux")]
-use winit::platform::unix::EventLoopBuilderExtUnix;
-#[cfg(target_os = "windows")]
-use winit::platform::windows::EventLoopBuilderExtWindows;
-#[cfg(target_os = "macos")]
-use winit::platform::macos::EventLoopBuilderExtMacOS;
-
+use glm::{Vec3, vec3};
 use world_mesh::WorldMesh;
-use crate::gui_runner::gui::frame_delta_timer::FrameDeltaTimer;
-use crate::gui_runner::gui::keyboard_event_handler::{KeyboardEventHandler, ProcessedKeyboardInput};
+use frame_delta_timer::FrameDeltaTimer;
+use keyboard_event_handler::{KeyboardEventHandler, ProcessedKeyboardInput};
 use super::{PartialWorld, RunMode};
 
-pub struct GUIThread {
-    worker_to_gui_rx: Receiver<PartialWorld>,
-    gui_to_game_tx: Sender<RunMode>,
-}
-impl GUIThread {
-    pub fn new(worker_to_gui_rx: Receiver<PartialWorld>, gui_to_game_tx: Sender<RunMode>) -> Self {
-        Self { worker_to_gui_rx, gui_to_game_tx }
-    }
-    pub fn start(self) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            let gui = GUI::new("Ragnarok", self.worker_to_gui_rx, self.gui_to_game_tx);
-            gui.run();
-        })
-    }
-}
+//extension that allows running winit on a thread that isn't the main thread. necessary since it's hard to run runner outside of main thread (it's not Send)
+#[cfg(target_os = "linux")] use winit::platform::unix::EventLoopBuilderExtUnix;
+#[cfg(target_os = "windows")] use winit::platform::windows::EventLoopBuilderExtWindows;
+#[cfg(target_os = "macos")] use winit::platform::macos::EventLoopBuilderExtMacOS;
 
-const UP : Vec3 = Vec3::new(0.0, 1.0, 0.0);
-pub fn view_matrix(position: Vec3, direction: Vec3, up: Vec3) -> Mat4 {
-    let f = direction.normalize();
-
-    let s = up.cross(&f);
-    let s_norm = s.normalize();
-
-    let u = f.cross(&s_norm);
-
-    let p = -vec3(position.dot(&s_norm), position.dot(&u), position.dot(&f));
-
-
-    Mat4::new(
-        s_norm.x,      s_norm.y,       s_norm.z,    p.x,
-        u.x,           u.y,            u.z,         p.y,
-        f.x,           f.y,            f.z,         p.z,
-        0.0, 0.0,      0.0,    1.0,
-    )
-}
-pub fn proj_matrix(frame: &Frame, fov: f32) -> Mat4 {
-    let (width, height) = frame.get_dimensions();
-    let aspect_ratio = width as f32 / height as f32;
-
-    glm::perspective_lh(aspect_ratio, fov, 1.0/32.0, 8192.0)
-}
+// GUI handles:
+// - rendering:
+//   - world rendering through WorldMesh
+//   - widget rendering through imgui
+// - user input:
+//   - keyboard input through KeyboardEventHandler (which uses winit events)
+//   - graphical input through imgui
+// - inter thread communication:
+//   - receives PartialWorld through worker->gui (uses feeds it to WorldMesh to turn it into a mesh)
+//   - sends RunMode through gui->game (when the user requests it with keyboard or graphical input)
 
 pub struct GUI {
     rx_from_worker: Receiver<PartialWorld>,
     tx_to_game: Sender<RunMode>,
     world_copy: PartialWorld,
 
-    event_loop: EventLoop<()>,
-    display: Display,
+    event_loop: winit::event_loop::EventLoop<()>,
+    display: glium::Display,
     imgui_ctx: imgui::Context,
     imgui_platform: imgui_winit_support::WinitPlatform,
     imgui_renderer: imgui_glium_renderer::Renderer,
 
     world_mesh: WorldMesh,
-    shader_program: Program,
+    shader_program: glium::Program,
 
     kbd_event_handler: KeyboardEventHandler,
 }
@@ -98,7 +61,7 @@ impl GUI {
             WindowBuilder::new()
                 .with_title(window_title);
 
-        let display = Display::new(window_builder, glium::glutin::ContextBuilder::new(), &event_loop).unwrap();
+        let display = glium::Display::new(window_builder, glium::glutin::ContextBuilder::new(), &event_loop).unwrap();
 
         let mut imgui_ctx = imgui::Context::create();
         imgui_ctx.set_ini_filename(None); //for some reason loading imgui.ini files sometimes causes crashes
@@ -203,7 +166,7 @@ impl GUI {
 
 
                     // move/rotate camera
-                    kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta, UP);
+                    kbd_input.update_cam_dir_and_pos(&mut cam_dir, &mut cam_pos, delta);
 
                     // make the camera go to the robot if needed
                     if find_robot || follow_robot {
@@ -222,10 +185,7 @@ impl GUI {
                     {
                         let mut target = self.display.draw();
 
-                        let mvp = {
-                            let model = Mat4::identity();
-                            proj_matrix(&target, PI / 3.0) * view_matrix(cam_pos, cam_dir, UP) * model
-                        };
+                        let mvp = compute_mvp::compute_mvp(target.get_dimensions(), cam_pos, cam_dir);
 
                         let draw_params = glium::DrawParameters {
                             depth: glium::Depth {
@@ -370,7 +330,6 @@ impl GUI {
                                     ui.separator();
 
                                     ui.text_wrapped(format!("FPS: {}", frame_delta_timer.get_average_fps() as u32));
-                                    ui.text_wrapped(format!("cam position: {:?}", cam_pos.as_ref()));
                                 });
 
                             let draw_data = self.imgui_ctx.render();
@@ -385,3 +344,5 @@ impl GUI {
         });
     }
 }
+
+const UP : Vec3 = Vec3::new(0.0, 1.0, 0.0);
