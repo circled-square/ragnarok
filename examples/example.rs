@@ -25,9 +25,10 @@ impl Runnable for ExampleRobot {
             let random_direction = random::<usize>() % 4;
             let random_direction = directions[random_direction].clone();
 
-            match robotics_lib::interface::go(self, world, random_direction.clone()).map(|_| {}) {
-                Ok(_) => {}
-                Err(_) => break,
+            if self.get_energy().get_energy_level() > 500 {
+                let _ = robotics_lib::interface::go(self, world, random_direction.clone()).map(|_| {});
+            } else {
+                break
             }
         }
     }
