@@ -177,9 +177,9 @@ impl GUI {
                         find_robot = false;
                     }
                     let world_size = self.world_copy.world.len() as f32;
-                    cam_pos.x = cam_pos.x.clamp(0.0, world_size);
-                    cam_pos.y = cam_pos.y.clamp(-world_size / 2.0, world_size / 2.0);
-                    cam_pos.z = cam_pos.z.clamp(0.0, world_size);
+                    cam_pos.x = cam_pos.x.clamp(-10.0, world_size+10.0);
+                    cam_pos.y = cam_pos.y.clamp(-world_size / 2.0 - 10.0, world_size / 2.0 + 10.0);
+                    cam_pos.z = cam_pos.z.clamp(-10.0, world_size+10.0);
 
                     // rendering
                     {

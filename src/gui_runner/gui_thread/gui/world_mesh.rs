@@ -461,7 +461,7 @@ with open(save_to_file, 'w') as file:
             [0.0, -1.0, 0.0],
         ];
         //scale
-        let octahedron_correct_size = octahedron.map(|p| p.map(|n| n * world_size * 2.1));
+        let octahedron_correct_size = octahedron.map(|p| p.map(|n| n * (world_size+10.0) * 2.1));
         //translate
         let positions_repetitionless = octahedron_correct_size.map(|[x, y, z]| [x + world_size / 2.0, y, z + world_size / 2.0]);
 
