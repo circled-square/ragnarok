@@ -1,6 +1,6 @@
 # ragnarok
 
-> :warning: Note that this is a university projects that depends on crates no longer publicly available. To see it in its full glory see ![this repository](https://github.com/Kalsifer-742/unitn-advanced-programming-demo)
+> :warning: Note that this is a university projects that depends on crates no longer publicly available. To see it in its full glory see ![this repository](https://github.com/Kalsifer-742/unitn-advanced-programming-demo), or watch [this video](./ragnarok.mp4)
 
 World visualizer
 
